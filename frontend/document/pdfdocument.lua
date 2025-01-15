@@ -1,3 +1,4 @@
+local BlitBuffer = require("ffi/blitbuffer")
 local CacheItem = require("cacheitem")
 local CanvasContext = require("document/canvascontext")
 local DocCache = require("document/doccache")
@@ -21,12 +22,6 @@ local PdfDocument = Document:extend{
 
 function PdfDocument:init()
     if not pdf then pdf = require("ffi/mupdf") end
-    -- mupdf.color has to stay false for kopt to work correctly
-    -- and be accurate (including its job about showing highlight
-    -- boxes). We will turn it on and off in PdfDocument:preRenderPage()
-    -- and :postRenderPage() when mupdf is called without kopt involved.
-    pdf.color = false
-    self:updateColorRendering()
     self.koptinterface = require("document/koptinterface")
     self.koptinterface:setDefaultConfigurable(self.configurable)
     local ok
@@ -34,6 +29,7 @@ function PdfDocument:init()
     if not ok then
         error(self._document)  -- will contain error message
     end
+    self:updateColorRendering()
     self.is_reflowable = self._document:isDocumentReflowable()
     self.reflowable_font_size = self:convertKoptToReflowableFontSize()
     -- no-op on PDF
@@ -41,10 +37,18 @@ function PdfDocument:init()
     self.is_open = true
     self.info.has_pages = true
     self.info.configurable = true
+    self.render_mode = 0
     if self._document:needsPassword() then
         self.is_locked = true
     else
         self:_readMetadata()
+    end
+end
+
+function PdfDocument:updateColorRendering()
+    Document.updateColorRendering(self) -- will set self.render_color
+    if self._document then
+        self._document:setColorRendering(self.render_color)
     end
 end
 
@@ -79,14 +83,6 @@ function PdfDocument:convertKoptToReflowableFontSize(font_size)
     else
         return default_font_size
     end
-end
-
-function PdfDocument:preRenderPage()
-    pdf.color = self.render_color
-end
-
-function PdfDocument:postRenderPage()
-    pdf.color = false
 end
 
 function PdfDocument:unlock(password)
@@ -211,18 +207,18 @@ local function _quadpointsFromPboxes(pboxes)
     -- will also need mupdf_h.lua to be evaluated once
     -- but this is guaranteed at this point
     local n = #pboxes
-    local quadpoints = ffi.new("float[?]", 8*n)
+    local quadpoints = ffi.new("fz_quad[?]", n)
     for i=1, n do
         -- The order must be left bottom, right bottom, left top, right top.
         -- https://bugs.ghostscript.com/show_bug.cgi?id=695130
-        quadpoints[8*i-8] = pboxes[i].x
-        quadpoints[8*i-7] = pboxes[i].y + pboxes[i].h
-        quadpoints[8*i-6] = pboxes[i].x + pboxes[i].w
-        quadpoints[8*i-5] = pboxes[i].y + pboxes[i].h
-        quadpoints[8*i-4] = pboxes[i].x
-        quadpoints[8*i-3] = pboxes[i].y
-        quadpoints[8*i-2] = pboxes[i].x + pboxes[i].w
-        quadpoints[8*i-1] = pboxes[i].y
+        quadpoints[i-1].ll.x = pboxes[i].x
+        quadpoints[i-1].ll.y = pboxes[i].y + pboxes[i].h - 1
+        quadpoints[i-1].lr.x = pboxes[i].x + pboxes[i].w - 1
+        quadpoints[i-1].lr.y = pboxes[i].y + pboxes[i].h - 1
+        quadpoints[i-1].ul.x = pboxes[i].x
+        quadpoints[i-1].ul.y = pboxes[i].y
+        quadpoints[i-1].ur.x = pboxes[i].x + pboxes[i].w - 1
+        quadpoints[i-1].ur.y = pboxes[i].y
     end
     return quadpoints, n
 end
@@ -232,10 +228,10 @@ local function _quadpointsToPboxes(quadpoints, n)
     local pboxes = {}
     for i=1, n do
         table.insert(pboxes, {
-            x = quadpoints[8*i-4],
-            y = quadpoints[8*i-3],
-            w = quadpoints[8*i-6] - quadpoints[8*i-4],
-            h = quadpoints[8*i-5] - quadpoints[8*i-3],
+            x = quadpoints[i-1].ul.x,
+            y = quadpoints[i-1].ul.y,
+            w = quadpoints[i-1].lr.x - quadpoints[i-1].ul.x + 1,
+            h = quadpoints[i-1].lr.y - quadpoints[i-1].ul.y + 1,
         })
     end
     return pboxes
@@ -249,6 +245,7 @@ function PdfDocument:saveHighlight(pageno, item)
     local quadpoints, n = _quadpointsFromPboxes(item.pboxes)
     local page = self._document:openPage(pageno)
     local annot_type = C.PDF_ANNOT_HIGHLIGHT
+    local annot_color = item.color and BlitBuffer.colorFromName(item.color)
     if item.drawer == "lighten" then
         annot_type = C.PDF_ANNOT_HIGHLIGHT
     elseif item.drawer == "underscore" then
@@ -256,7 +253,9 @@ function PdfDocument:saveHighlight(pageno, item)
     elseif item.drawer == "strikeout" then
         annot_type = C.PDF_ANNOT_STRIKE_OUT
     end
-    page:addMarkupAnnotation(quadpoints, n, annot_type) -- may update/adjust quadpoints
+    -- NOTE: For highlights, display style may differ compared to ReaderView:drawHighlightRect...
+    --       (e.g., we do a MUL blend, MuPDF currently appears to do an OVER blend).
+    page:addMarkupAnnotation(quadpoints, n, annot_type, annot_color) -- may update/adjust quadpoints
     -- Update pboxes with the possibly adjusted coordinates (this will have it updated
     -- in self.view.highlight.saved[page])
     item.pboxes = _quadpointsToPboxes(quadpoints, n)
@@ -337,20 +336,24 @@ function PdfDocument:getCoverPageImage()
     return self.koptinterface:getCoverPageImage(self)
 end
 
-function PdfDocument:findText(pattern, origin, reverse, caseInsensitive, page)
-    return self.koptinterface:findText(self, pattern, origin, reverse, caseInsensitive, page)
+function PdfDocument:findText(pattern, origin, reverse, case_insensitive, page)
+    return self.koptinterface:findText(self, pattern, origin, reverse, case_insensitive, page)
 end
 
-function PdfDocument:renderPage(pageno, rect, zoom, rotation, gamma, render_mode, hinting)
-    return self.koptinterface:renderPage(self, pageno, rect, zoom, rotation, gamma, render_mode, hinting)
+function PdfDocument:findAllText(pattern, case_insensitive, nb_context_words, max_hits)
+    return self.koptinterface:findAllText(self, pattern, case_insensitive, nb_context_words, max_hits)
 end
 
-function PdfDocument:hintPage(pageno, zoom, rotation, gamma, render_mode)
-    return self.koptinterface:hintPage(self, pageno, zoom, rotation, gamma, render_mode)
+function PdfDocument:renderPage(pageno, rect, zoom, rotation, gamma, hinting)
+    return self.koptinterface:renderPage(self, pageno, rect, zoom, rotation, gamma, hinting)
 end
 
-function PdfDocument:drawPage(target, x, y, rect, pageno, zoom, rotation, gamma, render_mode)
-    return self.koptinterface:drawPage(self, target, x, y, rect, pageno, zoom, rotation, gamma, render_mode)
+function PdfDocument:hintPage(pageno, zoom, rotation, gamma)
+    return self.koptinterface:hintPage(self, pageno, zoom, rotation, gamma)
+end
+
+function PdfDocument:drawPage(target, x, y, rect, pageno, zoom, rotation, gamma)
+    return self.koptinterface:drawPage(self, target, x, y, rect, pageno, zoom, rotation, gamma)
 end
 
 function PdfDocument:register(registry)
@@ -358,16 +361,22 @@ function PdfDocument:register(registry)
     registry:addProvider("cbt", "application/vnd.comicbook+tar", self, 100)
     registry:addProvider("cbz", "application/vnd.comicbook+zip", self, 100)
     registry:addProvider("cbz", "application/x-cbz", self, 100) -- Alternative mimetype for OPDS.
+    registry:addProvider("cfb", "application/octet-stream", self, 80) -- Compound File Binary, a Microsoft general-purpose file with a file-system-like structure.
+    registry:addProvider("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", self, 80)
     registry:addProvider("epub", "application/epub+zip", self, 50)
     registry:addProvider("epub3", "application/epub+zip", self, 50)
     registry:addProvider("fb2", "application/fb2", self, 80)
     registry:addProvider("htm", "text/html", self, 90)
     registry:addProvider("html", "text/html", self, 90)
+    registry:addProvider("mobi", "application/x-mobipocket-ebook", self, 80)
     registry:addProvider("pdf", "application/pdf", self, 100)
+    registry:addProvider("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", self, 80)
     registry:addProvider("tar", "application/x-tar", self, 10)
+    registry:addProvider("txt", "text/plain", self, 80)
     registry:addProvider("xhtml", "application/xhtml+xml", self, 90)
     registry:addProvider("xml", "application/xml", self, 10)
     registry:addProvider("xps", "application/oxps", self, 100)
+    registry:addProvider("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", self, 80)
     registry:addProvider("zip", "application/zip", self, 20)
 
     --- Picture types ---

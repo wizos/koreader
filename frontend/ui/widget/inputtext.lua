@@ -23,7 +23,7 @@ local FocusManagerInstance -- Delayed instantiation
 
 local InputText = InputContainer:extend{
     text = "",
-    hint = "demo hint",
+    hint = "",
     input_type = nil, -- "number" or anything else
     text_type = nil, -- "password" or anything else
     show_password_toggle = true,
@@ -77,6 +77,9 @@ function InputText:onUnfocus() end
 -- Resync our position state with our text widget's actual state
 function InputText:resyncPos()
     self.charpos, self.top_line_num = self.text_widget:getCharPos()
+    if self.strike_callback and self.min_buffer_size == nil then -- not Terminal plugin input
+        self.strike_callback()
+    end
 end
 
 local function initTouchEvents()
@@ -142,10 +145,14 @@ local function initTouchEvents()
                 if self.keyboard then
                     self.keyboard:showKeyboard()
                 end
+                -- Make sure we're flagged as in focus again.
+                -- NOTE: self:focus() does a full free/reinit cycle, which is completely unnecessary to begin with,
+                --       *and* resets cursor position, which is problematic when tapping on an already in-focus field (#12444).
+                --       So, just flip our own focused flag, that's the only thing we need ;).
+                self.focused = true
             end
-            -- zh keyboard with candidates shown here has _frame_textwidget.dimen = nil.
-            -- Check to avoid crash.
-            if #self.charlist > 0 and self._frame_textwidget.dimen then -- Avoid cursor moving within a hint.
+            if self._frame_textwidget.dimen ~= nil -- zh keyboard with candidates shown here has _frame_textwidget.dimen = nil
+                    and #self.charlist > 0 then -- do not move cursor within a hint
                 local textwidget_offset = self.margin + self.bordersize + self.padding
                 local x = ges.pos.x - self._frame_textwidget.dimen.x - textwidget_offset
                 local y = ges.pos.y - self._frame_textwidget.dimen.y - textwidget_offset
@@ -175,20 +182,22 @@ local function initTouchEvents()
                         })
                         self.selection_start_pos = nil
                         self.do_select = false
-                        return true
+                        self:initTextBox()
                     else -- select start
                         self.selection_start_pos = self.charpos
                         UIManager:show(Notification:new{
-                            text = _("Set cursor to end of selection, then hold."),
+                            text = _("Set cursor to end of selection, then long-press in text box."),
                         })
-                        return true
                     end
+                    self._hold_handled = true
+                    return true
                 end
                 local clipboard_value = Device.input.getClipboardText()
                 local is_clipboard_empty = clipboard_value == ""
                 local clipboard_dialog
                 clipboard_dialog = require("ui/widget/textviewer"):new{
                     title = _("Clipboard"),
+                    show_menu = false,
                     text = is_clipboard_empty and _("(empty)") or clipboard_value,
                     fgcolor = is_clipboard_empty and Blitbuffer.COLOR_DARK_GRAY or Blitbuffer.COLOR_BLACK,
                     width = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.8),
@@ -212,7 +221,7 @@ local function initTouchEvents()
                                 text = _("Copy line"),
                                 callback = function()
                                     UIManager:close(clipboard_dialog)
-                                    local txt = table.concat(self.charlist, "", self:getStringPos({"\n", "\r"}, {"\n", "\r"}))
+                                    local txt = table.concat(self.charlist, "", self:getStringPos())
                                     Device.input.setClipboardText(txt)
                                     UIManager:show(Notification:new{
                                         text = _("Line copied to clipboard."),
@@ -223,7 +232,7 @@ local function initTouchEvents()
                                 text = _("Copy word"),
                                 callback = function()
                                     UIManager:close(clipboard_dialog)
-                                    local txt = table.concat(self.charlist, "", self:getStringPos({"\n", "\r", " "}, {"\n", "\r", " "}))
+                                    local txt = table.concat(self.charlist, "", self:getStringPos(true))
                                     Device.input.setClipboardText(txt)
                                     UIManager:show(Notification:new{
                                         text = _("Word copied to clipboard."),
@@ -233,9 +242,11 @@ local function initTouchEvents()
                         },
                         {
                             {
-                                text = _("Cancel"),
+                                text = _("Delete all"),
+                                enabled = #self.charlist > 0,
                                 callback = function()
                                     UIManager:close(clipboard_dialog)
+                                    self:delAll()
                                 end,
                             },
                             {
@@ -243,9 +254,10 @@ local function initTouchEvents()
                                 callback = function()
                                     UIManager:close(clipboard_dialog)
                                     UIManager:show(Notification:new{
-                                        text = _("Set cursor to start of selection, then hold."),
+                                        text = _("Set cursor to start of selection, then long-press in text box."),
                                     })
                                     self.do_select = true
+                                    self:initTextBox()
                                 end,
                             },
                             {
@@ -293,11 +305,15 @@ end
 local function initDPadEvents()
     if Device:hasDPad() then
         function InputText:onFocus()
-            -- Event called by the focusmanager
+            -- Event sent by focusmanager
             if self.parent.onSwitchFocus then
                 self.parent:onSwitchFocus(self)
+            elseif (Device:hasKeyboard() or Device:hasScreenKB()) and G_reader_settings:isFalse("virtual_keyboard_enabled") then
+                do end -- luacheck: ignore 541
             else
-                self:onShowKeyboard()
+                if not self:isKeyboardVisible() then
+                    self:onShowKeyboard()
+                end
             end
             self:focus()
             return true
@@ -328,11 +344,10 @@ InputText.initInputEvents()
 
 function InputText:checkTextEditability()
     -- The split of the 'text' string to a table of utf8 chars may not be
-    -- reversible to the same string, if 'text'  comes from a binary file
+    -- reversible to the same string, if 'text' comes from a binary file
     -- (it looks like it does not necessarily need to be proper UTF8 to
     -- be reversible, some text with latin1 chars is reversible).
-    -- As checking that may be costly, we do that only in init(), setText(),
-    -- and clear().
+    -- As checking that may be costly, we do that only in init() and setText().
     -- When not reversible, we prevent adding and deleting chars to not
     -- corrupt the original self.text.
     self.is_text_editable = true
@@ -341,7 +356,7 @@ function InputText:checkTextEditability()
         -- in :initTextBox(), when concatenated back to a string, matches
         -- the original text. (If this turns out too expensive, we could
         -- just compare their lengths)
-        self.is_text_editable = table.concat(self.charlist, "") == self.text
+        self.is_text_editable = table.concat(self.charlist) == self.text
     end
 end
 
@@ -381,6 +396,7 @@ function InputText:init()
             self.hint = tostring(self.hint)
         end
     end
+    self.charlist = util.splitToChars(self.text)
     self:initTextBox(self.text)
     self:checkTextEditability()
     if self.readonly ~= true then
@@ -396,11 +412,12 @@ function InputText:initTextBox(text, char_added)
     if self.text_widget then
         self.text_widget:free(true)
     end
-    self.text = text
-    local fgcolor
-    local show_charlist
-    local show_text = text
-    if show_text == "" or show_text == nil then
+
+    -- 'text' is passed in init() and setText() only, to check editability;
+    -- other methods modify and provide self.charlist
+    self.text = text or table.concat(self.charlist)
+    local show_charlist, show_text, fgcolor
+    if self.text == "" then
         -- no preset value, use hint text if set
         show_text = self.hint
         fgcolor = Blitbuffer.COLOR_DARK_GRAY
@@ -409,14 +426,19 @@ function InputText:initTextBox(text, char_added)
     else
         fgcolor = Blitbuffer.COLOR_BLACK
         if self.text_type == "password" then
-            show_text = self.text:gsub(
-                "(.-).", function() return "*" end)
-            if char_added then
-                show_text = show_text:gsub(
-                    "(.)$", function() return self.text:sub(-1) end)
+            show_charlist = {}
+            for i = 1, #self.charlist do
+                if char_added and i == self.charpos - 1 then -- show last entered char
+                    show_charlist[i] = self.charlist[i]
+                else
+                    show_charlist[i] = "*"
+                end
             end
+            show_text = table.concat(show_charlist)
+        else
+            show_charlist = self.charlist
+            show_text = self.text
         end
-        self.charlist = util.splitToChars(text)
         -- keep previous cursor position if charpos not nil
         if self.charpos == nil then
             if self.cursor_at_end then
@@ -426,6 +448,7 @@ function InputText:initTextBox(text, char_added)
             end
         end
     end
+
     if self.is_password_type and self.show_password_toggle then
         self._check_button = self._check_button or CheckButton:new{
             text = _("Show password"),
@@ -447,7 +470,6 @@ function InputText:initTextBox(text, char_added)
     else
         self._password_toggle = nil
     end
-    show_charlist = util.splitToChars(show_text)
 
     if not self.height then
         -- If no height provided, measure the text widget height
@@ -481,6 +503,7 @@ function InputText:initTextBox(text, char_added)
             charpos = self.charpos,
             top_line_num = self.top_line_num,
             editable = self.focused,
+            select_mode = self.do_select,
             face = self.face,
             fgcolor = fgcolor,
             alignment = self.alignment,
@@ -503,6 +526,7 @@ function InputText:initTextBox(text, char_added)
             charpos = self.charpos,
             top_line_num = self.top_line_num,
             editable = self.focused,
+            select_mode = self.do_select,
             face = self.face,
             fgcolor = fgcolor,
             alignment = self.alignment,
@@ -551,20 +575,11 @@ function InputText:initTextBox(text, char_added)
         self.edit_callback(self.is_text_edited)
     end
 end
-dbg:guard(InputText, "initTextBox",
-    function(self, text, char_added)
-        assert(type(text) == "string",
-            "Wrong text type (expected string)")
-    end)
 
 function InputText:initKeyboard()
-    local keyboard_layer = 2
-    if self.input_type == "number" then
-        keyboard_layer = 4
-    end
     self.key_events = {}
     self.keyboard = Keyboard:new{
-        keyboard_layer = keyboard_layer,
+        keyboard_layer = self.input_type == "number" and 4 or 2,
         inputbox = self,
     }
 end
@@ -581,6 +596,17 @@ function InputText:focus()
     self._frame_textwidget.color = Blitbuffer.COLOR_BLACK
 end
 
+-- NOTE: This key_map can be used for keyboards without numeric keys, such as on Kindles with keyboards. It is loosely 'inspired' by the symbol layer on the virtual keyboard but,
+--       we have taken the liberty of making some adjustments since:
+--       * K3 does not have numeric keys (top row) and,
+--       * we want to prioritise the most-likely-used characters for "style tweaks" and note taking
+--       (in English, sorry everybody else, there are just not enough keys)
+local sym_key_map = {
+    ["Q"] = "!", ["W"] = "?", ["E"] = "-", ["R"] = "_", ["T"] = "%", ["Y"] = "=", ["U"] = "7", ["I"] = "8",  ["O"] = "9", ["P"] = "0",
+    ["A"] = "<", ["S"] = ">", ["D"] = "(", ["F"] = ")", ["G"] = "#", ["H"] = "'", ["J"] = "4", ["K"] = "5",  ["L"] = "6",
+    ["Z"] = "{", ["X"] = "}", ["C"] = "[", ["V"] = "]", ["B"] = "1", ["N"] = "2", ["M"] = "3", ["."] = ":", ["AA"] = ";",
+}
+
 -- Handle real keypresses from a physical keyboard, even if the virtual keyboard
 -- is shown. Mostly likely to be in the emulator, but could be Android + BT
 -- keyboard, or a "coder's keyboard" Android input method.
@@ -592,18 +618,25 @@ function InputText:onKeyPress(key)
     end
     local handled = true
 
-    if not key["Ctrl"] and not key["Shift"] and not key["Alt"] then
+    if not key["Ctrl"] and not key["Shift"] and not key["Alt"] and not key["ScreenKB"] then
         if key["Backspace"] then
             self:delChar()
         elseif key["Del"] then
-            self:delNextChar()
+            -- Kindles with physical keyboards only have a "Del" key (no "Backspace").
+            if Device:hasSymKey() then
+                self:delChar()
+            else
+                self:delNextChar()
+            end
         elseif key["Left"] then
             self:leftChar()
         elseif key["Right"] then
             self:rightChar()
-        elseif key["Up"] then
+        -- NOTE: When we are not showing the virtual keyboard, let focusmanger handle up/down keys, as they  are used to directly move around the widget
+        --       seamlessly in and out of text fields and onto virtual buttons like `[cancel] [search dict]`, no need to unfocus first.
+        elseif key["Up"] and G_reader_settings:nilOrTrue("virtual_keyboard_enabled") then
             self:upLine()
-        elseif key["Down"] then
+        elseif key["Down"] and G_reader_settings:nilOrTrue("virtual_keyboard_enabled") then
             self:downLine()
         elseif key["End"] then
             self:goToEnd()
@@ -613,7 +646,8 @@ function InputText:onKeyPress(key)
             self:addChars("\n")
         elseif key["Tab"] then
             self:addChars("    ")
-        elseif key["Back"] then
+        -- as stated before, we also don't need to unfocus when there is no keyboard, one less key press to exit widgets, yay!
+        elseif key["Back"] and G_reader_settings:nilOrTrue("virtual_keyboard_enabled") then
             if self.focused then
                 self:unfocus()
             end
@@ -631,6 +665,47 @@ function InputText:onKeyPress(key)
     else
         handled = false
     end
+    -- This primarily targets Kindle. When a virtual keyboard is shown on screen, mod+dpad allows controlling the cursor, as dpad alone
+    -- (see previous ‘if’) is now occupied handling the virtual keyboard.
+    if not handled and (key["ScreenKB"] or key["Shift"]) then
+        handled = true
+        if key["Back"] and Device:hasScreenKB() then
+            self:delChar()
+        elseif key["Back"] and Device:hasSymKey() then
+            self:delToStartOfLine()
+        elseif key["Del"] and Device:hasSymKey() then
+            self:delWord()
+        elseif key["Left"] then
+            self:leftChar()
+        elseif key["Right"] then
+            self:rightChar()
+        elseif key["Up"] then
+            self:upLine()
+        elseif key["Down"] then
+            self:downLine()
+        elseif key["Home"] then
+            if self.keyboard:isVisible() then
+                self:onCloseKeyboard()
+            else
+                self:onShowKeyboard()
+            end
+        elseif key["."] and Device:hasSymKey() then
+            -- Kindle does not have a dedicated button for commas
+            self:addChars(",")
+        else
+            handled = false
+        end
+    end
+    if not handled and Device:hasSymKey() then
+        handled = true
+        local symkey = sym_key_map[key.key]
+        -- Do not match Shift + Sym + 'Alphabet keys'
+        if symkey and key.modifiers["Sym"] and not key.modifiers["Shift"] then
+            self:addChars(symkey)
+        else
+            handled = false
+        end
+    end
     if not handled and Device:hasDPad() then
         -- FocusManager may turn on alternative key maps.
         -- These key map maybe single text keys.
@@ -647,6 +722,10 @@ function InputText:onKeyPress(key)
         -- if it is single text char, insert it
         local key_code = key.key -- is in upper case
         if not Device.isSDL() and #key_code == 1 then
+            if key["Shift"] and key["Alt"] and key["G"] then
+                -- Allow the screenshot keyboard-shortcut to work when focus is on InputText
+                return false
+            end
             if not key["Shift"] then
                 key_code = string.lower(key_code)
             end
@@ -698,6 +777,8 @@ function InputText:isKeyboardVisible()
     if self.keyboard then
         return self.keyboard:isVisible()
     end
+    -- NOTE: Never return `nil`, to avoid inheritance issues in (Multi)InputDialog's keyboard_visible flag.
+    return false
 end
 
 function InputText:lockKeyboard(toggle)
@@ -722,24 +803,21 @@ function InputText:getLineHeight()
 end
 
 function InputText:getKeyboardDimen()
-    if self.readonly then
-        return Geom:new{w = 0, h = 0}
-    end
-    return self.keyboard.dimen
+    return self.readonly and Geom:new{w = 0, h = 0} or self.keyboard.dimen
 end
 
 -- calculate current and last (original) line numbers
 function InputText:getLineNums()
-    local cur_line_num, last_line_num = 1, 1
+    local curr_line_num, last_line_num = 1, 1
     for i = 1, #self.charlist do
         if self.text_widget.charlist[i] == "\n" then
             if i < self.charpos then
-                cur_line_num = cur_line_num + 1
+                curr_line_num = curr_line_num + 1
             end
             last_line_num = last_line_num + 1
         end
     end
-    return cur_line_num, last_line_num
+    return curr_line_num, last_line_num
 end
 
 -- calculate charpos for the beginning of (original) line
@@ -760,76 +838,60 @@ function InputText:getLineCharPos(line_num)
     return char_pos
 end
 
--- Get start and end positions of the substring
--- delimited with the delimiters and containing char_pos.
--- If char_pos not set, current charpos assumed.
-function InputText:getStringPos(left_delimiter, right_delimiter, char_pos)
-    char_pos = char_pos and char_pos or self.charpos
-    local start_pos, end_pos = 1, #self.charlist
-    local done = false
-    if char_pos > 1 then
-        for i = char_pos, 2, -1 do
-            for j = 1, #left_delimiter do
-                if self.charlist[i-1] == left_delimiter[j] then
-                    start_pos = i
-                    done = true
-                    break
-                end
+-- Get start and end positions of a line (or a word) under the cursor.
+function InputText:getStringPos(is_word, left_to_cursor)
+    local delimiter = is_word and "[\n\r%s.,;:!?–—―]" or "[\n\r]"
+    local start_pos, end_pos
+    if self.charpos > 1 then
+        for i = self.charpos - 1, 1, -1 do
+            if self.charlist[i]:find(delimiter) then
+                start_pos = i + 1
+                break
             end
-            if done then break end
         end
     end
-    done = false
-    if char_pos < #self.charlist then
-        for i = char_pos, #self.charlist do
-            for j = 1, #right_delimiter do
-                if self.charlist[i] == right_delimiter[j] then
+    if left_to_cursor then
+        end_pos = self.charpos - 1
+    else
+        if self.charpos <= #self.charlist then
+            for i = self.charpos, #self.charlist do
+                if self.charlist[i]:find(delimiter) then
                     end_pos = i - 1
-                    done = true
                     break
                 end
             end
-            if done then break end
         end
     end
-    return start_pos, end_pos
+    return start_pos or 1, end_pos or #self.charlist
 end
 
 --- Return the character at the given offset. If is_absolute is truthy then the
 -- offset is the absolute position, otherwise the offset is added to the current
 -- cursor position (negative offsets are allowed).
 function InputText:getChar(offset, is_absolute)
-    local idx
-    if is_absolute then
-        idx = offset
-    else
-        idx = self.charpos + offset
-    end
-    if idx < 1 or idx > #self.charlist then return end
+    local idx = is_absolute and offset or self.charpos + offset
     return self.charlist[idx]
 end
 
 function InputText:addChars(chars)
-    if not chars then
-        -- VirtualKeyboard:addChar(key) gave us 'nil' once (?!)
-        -- which would crash table.concat()
-        return
-    end
     if self.enter_callback and chars == "\n" then
         UIManager:scheduleIn(0.3, function() self.enter_callback() end)
         return
     end
+
     if self.readonly or not self:isTextEditable(true) then
         return
     end
-
-    self.is_text_edited = true
     if #self.charlist == 0 then -- widget text is empty or a hint text is displayed
         self.charpos = 1 -- move cursor to the first position
     end
-    table.insert(self.charlist, self.charpos, chars)
-    self.charpos = self.charpos + #util.splitToChars(chars)
-    self:initTextBox(table.concat(self.charlist), true)
+    local added_charlist = util.splitToChars(chars)
+    for i = #added_charlist, 1, -1 do
+        table.insert(self.charlist, self.charpos, added_charlist[i])
+    end
+    self.charpos = self.charpos + #added_charlist
+    self.is_text_edited = true
+    self:initTextBox(nil, true)
 end
 dbg:guard(InputText, "addChars",
     function(self, chars)
@@ -843,9 +905,9 @@ function InputText:delChar()
     end
     if self.charpos == 1 then return end
     self.charpos = self.charpos - 1
-    self.is_text_edited = true
     table.remove(self.charlist, self.charpos)
-    self:initTextBox(table.concat(self.charlist))
+    self.is_text_edited = true
+    self:initTextBox()
 end
 
 function InputText:delNextChar()
@@ -853,9 +915,31 @@ function InputText:delNextChar()
         return
     end
     if self.charpos > #self.charlist then return end
-    self.is_text_edited = true
     table.remove(self.charlist, self.charpos)
-    self:initTextBox(table.concat(self.charlist))
+    self.is_text_edited = true
+    self:initTextBox()
+end
+
+function InputText:delWord(left_to_cursor)
+    if self.readonly or not self:isTextEditable(true) then
+        return
+    end
+    local start_pos, end_pos = self:getStringPos(true, left_to_cursor)
+    start_pos = math.min(start_pos, end_pos)
+    for i = end_pos, start_pos, -1 do
+        table.remove(self.charlist, i)
+    end
+    if #self.charlist > 0 then
+        local prev_pos = start_pos > 1 and start_pos - 1 or 1
+        if not left_to_cursor and self.charlist[prev_pos]:find("[ \t]") then -- remove redundant space
+            table.remove(self.charlist, prev_pos)
+            self.charpos = prev_pos
+        else
+            self.charpos = start_pos
+        end
+    end
+    self.is_text_edited = true
+    self:initTextBox()
 end
 
 function InputText:delToStartOfLine()
@@ -876,7 +960,17 @@ function InputText:delToStartOfLine()
         end
     end
     self.is_text_edited = true
-    self:initTextBox(table.concat(self.charlist))
+    self:initTextBox()
+end
+
+function InputText:delAll()
+    if self.readonly or not self:isTextEditable(true) then
+        return
+    end
+    if #self.charlist == 0 then return end
+    self.charlist = {}
+    self.is_text_edited = true
+    self:initTextBox()
 end
 
 -- For the following cursor/scroll methods, the text_widget deals
@@ -894,14 +988,14 @@ function InputText:rightChar()
 end
 
 function InputText:goToStartOfLine()
-    local new_pos = select(1, self:getStringPos({"\n", "\r"}, {"\n", "\r"}))
+    local new_pos = self:getStringPos()
     self.text_widget:moveCursorToCharPos(new_pos)
     self:resyncPos()
 end
 
 function InputText:goToEndOfLine()
-    local new_pos = select(2, self:getStringPos({"\n", "\r"}, {"\n", "\r"})) + 1
-    self.text_widget:moveCursorToCharPos(new_pos)
+    local _, new_pos = self:getStringPos()
+    self.text_widget:moveCursorToCharPos(new_pos + 1)
     self:resyncPos()
 end
 
@@ -951,20 +1045,13 @@ function InputText:scrollToBottom()
     self:resyncPos()
 end
 
-function InputText:clear()
-    self.charpos = nil
-    self.top_line_num = 1
-    self.is_text_edited = true
-    self:initTextBox("")
-    self:checkTextEditability()
-end
-
 function InputText:getText()
     return self.text
 end
 
 function InputText:setText(text, keep_edited_state)
     -- Keep previous charpos and top_line_num
+    self.charlist = util.splitToChars(text)
     self:initTextBox(text)
     if not keep_edited_state then
         -- assume new text is set by caller, and we start fresh

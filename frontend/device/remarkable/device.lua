@@ -32,6 +32,7 @@ local isRm2, rm_model = getModel()
 local Remarkable = Generic:extend{
     isRemarkable = yes,
     model = rm_model,
+    ota_model = "remarkable",
     hasKeys = yes,
     needsScreenRefreshAfterResume = no,
     hasOTAUpdates = yes,
@@ -124,7 +125,7 @@ function Remarkable:init()
     -- logger.info("PPID:")
     -- local parent_process = os.execute("echo $PPID")
     -- os.execute("ps | grep $PPID")
-    -- logger.info(string.format("parent proccess is oxide?: %s", parent_process_is_oxide))
+    -- logger.info(string.format("parent process is oxide?: %s", parent_process_is_oxide))
 
     self.screen = require("ffi/framebuffer_mxcfb"):new{device = self, debug = logger.dbg}
     self.powerd = require("device/remarkable/powerd"):new{
@@ -133,7 +134,7 @@ function Remarkable:init()
         status_file = self.status_path,
     }
 
-    local event_map = require("device/remarkable/event_map")
+    local event_map = dofile("frontend/device/remarkable/event_map.lua")
     -- If we are launched while Oxide is running, remove Power from the event map
     if oxide_running then
         event_map[116] = nil
@@ -141,7 +142,7 @@ function Remarkable:init()
 
     self.input = require("device/input"):new{
         device = self,
-        event_map = require("device/remarkable/event_map"),
+        event_map = dofile("frontend/device/remarkable/event_map.lua"),
         wacom_protocol = true,
     }
 
@@ -166,9 +167,9 @@ function Remarkable:init()
         self.input_ts = "/dev/input/touchscreen0"
     end
 
-    self.input.open(self.input_wacom) -- Wacom
-    self.input.open(self.input_ts) -- Touchscreen
-    self.input.open(self.input_buttons) -- Buttons
+    self.input:open(self.input_wacom) -- Wacom
+    self.input:open(self.input_ts) -- Touchscreen
+    self.input:open(self.input_buttons) -- Buttons
 
     local scalex = screen_width / self.mt_width
     local scaley = screen_height / self.mt_height
@@ -201,7 +202,7 @@ function Remarkable:init()
     end
 
     -- USB plug/unplug, battery charge/not charging are generated as fake events
-    self.input.open("fake_events")
+    self.input:open("fake_events")
 
     local rotation_mode = self.screen.DEVICE_ROTATED_UPRIGHT
     self.screen.native_rotation_mode = rotation_mode
@@ -308,4 +309,3 @@ if isRm2 then
 else
     return Remarkable1
 end
-

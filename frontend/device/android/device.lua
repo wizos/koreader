@@ -46,7 +46,7 @@ local function getCodename()
     return codename
 end
 
--- thirdparty app support
+-- third-party app support
 local external = require("device/thirdparty"):new{
     dicts = {
         { "Aard2", "Aard2", false, "itkach.aard2", "aard2" },
@@ -59,6 +59,7 @@ local external = require("device/thirdparty"):new{
         { "GoldenFree", "GoldenDict Free", false, "mobi.goldendict.android.free", "send" },
         { "GoldenPro", "GoldenDict Pro", false, "mobi.goldendict.android", "send" },
         { "Kiwix", "Kiwix", false, "org.kiwix.kiwixmobile", "text" },
+        { "KiwixStandalone", "Kiwix (F-Droid)", false, "org.kiwix.kiwixmobile.standalone", "text" },
         { "LookUp", "Look Up", false, "gaurav.lookup", "send" },
         { "LookUpPro", "Look Up Pro", false, "gaurav.lookuppro", "send" },
         { "Mdict", "Mdict", false, "cn.mdict", "send" },
@@ -74,6 +75,7 @@ local Device = Generic:extend{
     model = android.prop.product,
     hasKeys = yes,
     hasDPad = no,
+    hasSeamlessWifiToggle = no, -- Requires losing focus to the sytem's network settings and user interaction
     hasExitOptions = no,
     hasEinkScreen = function() return android.isEink() end,
     hasColorScreen = android.isColorScreen,
@@ -115,17 +117,27 @@ local Device = Generic:extend{
     end,
 }
 
+function Device:otaModel()
+    -- "x86", "x64", "arm", "arm64", "ppc", "mips" or "mips64".
+    local arch = jit.arch
+    local model
+    if arch == "arm64" then
+        model = "android-arm64"
+    elseif arch == "x86" then
+        model = "android-x86"
+    elseif arch == "x64" then
+        model = "android-x86_64"
+    else
+        model = "android"
+    end
+    return model, "link"
+end
+
 function Device:init()
     self.screen = require("ffi/framebuffer_android"):new{device = self, debug = logger.dbg}
     self.powerd = require("device/android/powerd"):new{device = self}
 
-    local event_map = require("device/android/event_map")
-
-    if android.prop.is_tolino then
-        -- dpad left/right as page back/forward
-        event_map[21] = "LPgBack"
-        event_map[22] = "LPgFwd"
-    end
+    local event_map = dofile("frontend/device/android/event_map.lua")
 
     self.input = require("device/input"):new{
         device = self,
@@ -229,6 +241,11 @@ function Device:init()
         end,
     }
 
+    -- disable translation for specific models, where media keys follow gravity, see https://github.com/koreader/koreader/issues/12423
+    if android.prop.model == "moaanmix7" or android.prop.model == "xiaomi_reader" then
+        self.input:disableRotationMap()
+    end
+
     -- check if we have a keyboard
     if android.lib.AConfiguration_getKeyboard(android.app.config)
        == C.ACONFIGURATION_KEYBOARD_QWERTY
@@ -287,9 +304,15 @@ end
 function Device:initNetworkManager(NetworkMgr)
     function NetworkMgr:turnOnWifi(complete_callback)
         android.openWifiSettings()
+        if complete_callback then
+            complete_callback()
+        end
     end
     function NetworkMgr:turnOffWifi(complete_callback)
         android.openWifiSettings()
+        if complete_callback then
+            complete_callback()
+        end
     end
 
     function NetworkMgr:openSettings()
@@ -326,12 +349,7 @@ function Device:retrieveNetworkInfo()
             return _("Connected to mobile data network")
         elseif type == C.ANETWORK_ETHERNET then
             return _("Connected to Ethernet")
-        elseif type == C.ANETWORK_BLUETOOTH then
-            return _("Connected to Bluetooth")
-        elseif type == C.ANETWORK_VPN then
-            return _("Connected to VPN")
         end
-        return _("Unknown connection")
     end
 end
 
@@ -459,6 +477,8 @@ function Device:test()
 end
 
 function Device:exit()
+    Generic.exit(self)
+
     android.LOGI(string.format("Stopping %s main activity", android.prop.name))
     android.lib.ANativeActivity_finish(android.app.activity)
 end
@@ -515,7 +535,6 @@ function Device:_showLightDialog()
     elseif action == C.ALIGHTS_DIALOG_CANCEL then
         logger.dbg("Dialog Cancel, brightness: " .. self.powerd.fl_intensity)
         self.powerd:setIntensityHW(self.powerd.fl_intensity)
-        self.powerd:_decideFrontlightState()
         if android.isWarmthDevice() then
             logger.dbg("Dialog Cancel, warmth: " .. self.powerd.fl_warmth)
             self.powerd:setWarmth(self.powerd.fl_warmth)

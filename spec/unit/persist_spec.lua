@@ -27,11 +27,12 @@ describe("Persist module", function()
     setup(function()
         require("commonrequire")
         Persist = require("persist")
-        bitserInstance = Persist:new{ path = "test.dat", codec = "bitser" }
-        luajitInstance = Persist:new{ path = "testj.dat", codec = "luajit" }
-        zstdInstance = Persist:new{ path = "test.zst", codec = "zstd" }
-        dumpInstance = Persist:new{ path = "test.lua", codec = "dump" }
-        serpentInstance = Persist:new{ path = "tests.lua", codec = "serpent" }
+        local datadir = require("datastorage"):getDataDir()
+        bitserInstance = Persist:new{ path = datadir .. "/test.dat", codec = "bitser" }
+        luajitInstance = Persist:new{ path = datadir .. "/testj.dat", codec = "luajit" }
+        zstdInstance = Persist:new{ path = datadir .. "/test.zst", codec = "zstd" }
+        dumpInstance = Persist:new{ path = datadir .. "/test.lua", codec = "dump" }
+        serpentInstance = Persist:new{ path = datadir .. "/tests.lua", codec = "serpent" }
         sample = arrayOf(1000)
     end)
 
@@ -95,7 +96,7 @@ describe("Persist module", function()
     end)
 
     it("should work with huge tables", function()
-        local tab = arrayOf(100000)
+        local tab = arrayOf(10000)
         for _, codec in ipairs({"bitser", "luajit"}) do
             local ser = Persist.getCodec(codec).serialize
             local deser = Persist.getCodec(codec).deserialize

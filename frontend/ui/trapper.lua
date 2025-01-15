@@ -179,8 +179,10 @@ function Trapper:info(text, fast_refresh)
                 return false
             end
             if self.current_widget then
-                -- Re-show current widget that was dismissed
-                -- (this is fine for our simple InfoMessage)
+                -- Resurrect a dead widget. This should only be performed by trained Necromancers.
+                -- Do NOT do this at home, kids.
+                -- Some state *might* be lost, but the basics should survive...
+                self.current_widget:init()
                 UIManager:show(self.current_widget)
             end
             UIManager:forceRePaint()
@@ -395,7 +397,7 @@ function Trapper:dismissablePopen(cmd, trap_widget_or_string)
         -- We check regularly if data is available to be read, and we give control
         -- in the meantime to UIManager so our trap_widget's dismiss_callback
         -- get a chance to be triggered, in which case we won't wait for reading,
-        -- We'll schedule a background function to collect the uneeded output and
+        -- We'll schedule a background function to collect the unneeded output and
         -- close the pipe later.
         while true do
             -- Every 10 iterations, increase interval until a max of 1 sec is reached
@@ -415,7 +417,7 @@ function Trapper:dismissablePopen(cmd, trap_widget_or_string)
                 -- zombie processes.
                 local collect_and_clean
                 collect_and_clean = function()
-                    if ffiutil.getNonBlockingReadSize(std_out) ~= 0 then -- cmd started outputing
+                    if ffiutil.getNonBlockingReadSize(std_out) ~= 0 then -- cmd started outputting
                         std_out:read("*all")
                         std_out:close()
                         logger.dbg("collected cancelled cmd output")
@@ -598,7 +600,7 @@ function Trapper:dismissableRunInSubprocess(task, trap_widget_or_string, task_re
                         logger.dbg("collected previously dismissed subprocess")
                     else
                         if parent_read_fd and ffiutil.getNonBlockingReadSize(parent_read_fd) ~= 0 then
-                            -- If subprocess started outputing to fd, read from it,
+                            -- If subprocess started outputting to fd, read from it,
                             -- so its write() stops blocking and subprocess can exit
                             ffiutil.readAllFromFD(parent_read_fd)
                             -- We closed our fd, don't try again to read or close it
@@ -614,7 +616,7 @@ function Trapper:dismissableRunInSubprocess(task, trap_widget_or_string, task_re
             end
             -- The go_on_func resumed us: we have not been dismissed.
             -- Check if sub process has ended
-            -- Depending on the the size of what the child has to write,
+            -- Depending on the size of what the child has to write,
             -- it may has ended (if data fits in the kernel pipe buffer) or
             -- it may still be alive blocking on write() (if data exceeds
             -- the kernel pipe buffer)

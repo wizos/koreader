@@ -2,6 +2,7 @@ local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
 local BottomContainer = require("ui/widget/container/bottomcontainer")
 local Button = require("ui/widget/button")
+local ButtonDialog = require("ui/widget/buttondialog")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local CheckMark = require("ui/widget/checkmark")
 local Device = require("device")
@@ -25,6 +26,7 @@ local Screen = Device.screen
 local util = require("util")
 local T = require("ffi/util").template
 local _ = require("gettext")
+local C_ = _.pgettext
 
 local SortItemWidget = InputContainer:extend{
     item = nil,
@@ -131,7 +133,7 @@ local SortWidget = FocusManager:extend{
     -- table of items to sort
     item_table = nil, -- mandatory (array)
     callback = nil,
-    sort_disabled = false
+    sort_disabled = false,
 }
 
 function SortWidget:init()
@@ -151,6 +153,7 @@ function SortWidget:init()
         self.key_events.Close = { { Device.input.group.Back } }
         self.key_events.NextPage = { { Device.input.group.PgFwd } }
         self.key_events.PrevPage = { { Device.input.group.PgBack } }
+        self.key_events.ShowWidgetMenu = { { "Menu" } }
     end
     if Device:isTouchDevice() then
         self.ges_events.Swipe = {
@@ -239,11 +242,10 @@ function SortWidget:init()
         text = "",
         hold_input = {
             title = _("Enter page number"),
+            input_type = "number",
             hint_func = function()
-                return "(" .. "1 - " .. self.pages .. ")"
+                return string.format("(1 - %s)", self.pages)
             end,
-            type = "number",
-            deny_blank_input = true,
             callback = function(input)
                 local page = tonumber(input)
                 if page and page >= 1 and page <= self.pages then
@@ -271,6 +273,11 @@ function SortWidget:init()
     }
     table.insert(self.layout, {
         self.footer_cancel,
+        self.footer_first_up,
+        self.footer_left,
+        self.footer_page,
+        self.footer_right,
+        self.footer_last_down,
         self.footer_ok,
     })
     local bottom_line = LineWidget:new{
@@ -293,6 +300,8 @@ function SortWidget:init()
         bottom_line_color = Blitbuffer.COLOR_DARK_GRAY,
         bottom_line_h_padding = padding,
         title = self.title,
+        left_icon = not self.sort_disabled and "appbar.menu",
+        left_icon_tap_callback = function() self:onShowWidgetMenu() end,
         close_callback = function() self:onClose() end,
         show_parent = self,
     }
@@ -337,24 +346,24 @@ function SortWidget:init()
 end
 
 function SortWidget:nextPage()
-    local new_page = math.min(self.show_page+1, self.pages)
-    if new_page > self.show_page then
-        self.show_page = new_page
-        if self.marked > 0 then
+    if self.show_page < self.pages then
+        self.show_page = self.show_page + 1
+        if self.marked > 0 then -- put selected item first in the page
             self:moveItem(self.items_per_page * (self.show_page - 1) + 1 - self.marked)
+        else
+            self:_populateItems()
         end
-        self:_populateItems()
     end
 end
 
 function SortWidget:prevPage()
-    local new_page = math.max(self.show_page-1, 1)
-    if new_page < self.show_page then
-        self.show_page = new_page
-        if self.marked > 0 then
+    if self.show_page > 1 then
+        self.show_page = self.show_page - 1
+        if self.marked > 0 then -- put selected item first in the page
             self:moveItem(self.items_per_page * (self.show_page - 1) + 1 - self.marked)
+        else
+            self:_populateItems()
         end
-        self:_populateItems()
     end
 end
 
@@ -403,12 +412,21 @@ function SortWidget:_populateItems()
             show_parent = self,
         }
         table.insert(self.layout, #self.layout, {item})
-        table.insert(
-            self.main_content,
-            item
-        )
+        table.insert(self.main_content, item)
     end
-    self.footer_page:setText(T(_("Page %1 of %2"), self.show_page, self.pages), self.footer_center_width)
+    if self.marked == 0 then
+        -- Reset the focus to the top of the page when we're not moving an item (#12342)
+        self:moveFocusTo(1, 1)
+    else
+        -- When we're moving an item, move the focus to the footer (last row),
+        -- while keeping the focus on the current button (or cancel for the initial move,
+        -- as there's only one column of items, so x == 1, which points to the first button, which is cancel).
+        -- even when we change pages and the amount of rows may have changed
+        self:moveFocusTo(self.selected.x, #self.layout)
+    end
+
+    -- NOTE: We forgo our usual "Page x of y" wording because of space constraints given the way the widget is currently built
+    self.footer_page:setText(T(C_("Pagination", "%1 / %2"), self.show_page, self.pages), self.footer_center_width)
     if self.pages > 1 then
         self.footer_page:enable()
     else
@@ -420,11 +438,14 @@ function SortWidget:_populateItems()
         chevron_first, chevron_last = chevron_last, chevron_first
     end
     if self.marked > 0 then
+        -- setIcon will recreate the frame, but we want to preserve the focus inversion
+        self.footer_cancel.preselect = self.footer_cancel.frame.invert
         self.footer_cancel:setIcon("cancel", self.footer_button_width)
         self.footer_cancel.callback = function() self:onCancel() end
         self.footer_first_up:setIcon("move.up", self.footer_button_width)
         self.footer_last_down:setIcon("move.down", self.footer_button_width)
     else
+        self.footer_cancel.preselect = self.footer_cancel.frame.invert
         self.footer_cancel:setIcon("exit", self.footer_button_width)
         self.footer_cancel.callback = function() self:onClose() end
         self.footer_first_up:setIcon(chevron_first, self.footer_button_width)
@@ -468,6 +489,65 @@ function SortWidget:onSwipe(arg, ges_ev)
         -- so let it propagate
         return false
     end
+end
+
+function SortWidget:onShowWidgetMenu()
+    local dialog
+    local buttons = {
+        {{
+            text = _("Sort A to Z"),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                self:sortItems("strcoll")
+            end,
+        }},
+        {{
+            text = _("Sort Z to A"),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                self:sortItems("strcoll", true)
+            end,
+        }},
+        {{
+            text = _("Sort A to Z (natural)"),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                self:sortItems("natural")
+            end,
+        }},
+        {{
+            text = _("Sort Z to A (natural)"),
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                self:sortItems("natural", true)
+            end,
+        }},
+    }
+    dialog = ButtonDialog:new{
+        shrink_unneeded_width = true,
+        buttons = buttons,
+        anchor = function()
+            return self.title_bar.left_button.image.dimen
+        end,
+    }
+    UIManager:show(dialog)
+    return true
+end
+
+function SortWidget:sortItems(collate, reverse_collate)
+    if not self.orig_item_table then
+        self.orig_item_table = util.tableDeepCopy(self.item_table)
+    end
+    local FileChooser = require("ui/widget/filechooser")
+    local sort_func = FileChooser:getSortingFunction(FileChooser.collates[collate], reverse_collate)
+    table.sort(self.item_table, sort_func)
+    self.show_page = 1
+    self.marked = 1 -- enable cancel button
+    self:_populateItems()
 end
 
 function SortWidget:onClose()

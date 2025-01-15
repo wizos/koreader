@@ -6,6 +6,7 @@ local DictQuickLookup = require("ui/widget/dictquicklookup")
 local Event = require("ui/event")
 local Geom = require("ui/geometry")
 local InfoMessage = require("ui/widget/infomessage")
+local InputContainer = require("ui/widget/container/inputcontainer")
 local InputDialog = require("ui/widget/inputdialog")
 local JSON = require("json")
 local KeyValuePage = require("ui/widget/keyvaluepage")
@@ -15,7 +16,6 @@ local NetworkMgr = require("ui/network/manager")
 local SortWidget = require("ui/widget/sortwidget")
 local Trapper = require("ui/trapper")
 local UIManager = require("ui/uimanager")
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffi = require("ffi")
 local C = ffi.C
 local ffiUtil  = require("ffi/util")
@@ -26,6 +26,7 @@ local util  = require("util")
 local _ = require("gettext")
 local Input = Device.input
 local T = ffiUtil.template
+local android = Device:isAndroid() and require("android")
 
 -- We'll store the list of available dictionaries as a module local
 -- so we only have to look for them on the first :init()
@@ -60,7 +61,7 @@ local function getIfosInDir(path)
     return ifos
 end
 
-local ReaderDictionary = WidgetContainer:extend{
+local ReaderDictionary = InputContainer:extend{
     data_dir = nil,
     lookup_msg = _("Searching dictionary for:\n%1"),
 }
@@ -99,6 +100,8 @@ local function getDictionaryFixHtmlFunc(path)
 end
 
 function ReaderDictionary:init()
+    self:registerKeyEvents()
+
     self.disable_lookup_history = G_reader_settings:isTrue("disable_lookup_history")
     self.dicts_order = G_reader_settings:readSetting("dicts_order", {})
     self.dicts_disabled = G_reader_settings:readSetting("dicts_disabled", {})
@@ -111,7 +114,7 @@ function ReaderDictionary:init()
         os.getenv("STARDICT_DATA_DIR") or
         DataStorage:getDataDir() .. "/data/dict"
 
-    -- Show the "Seaching..." InfoMessage after this delay
+    -- Show the "Searching..." InfoMessage after this delay
     self.lookup_msg_delay = 0.5
     -- Allow quick interruption or dismiss of search result window
     -- with tap if done before this delay. After this delay, the
@@ -159,6 +162,12 @@ function ReaderDictionary:init()
 
     if not lookup_history then
         lookup_history = LuaData:open(DataStorage:getSettingsDir() .. "/lookup_history.lua", "LookupHistory")
+    end
+end
+
+function ReaderDictionary:registerKeyEvents()
+    if Device:hasKeyboard() then
+        self.key_events.ShowDictionaryLookup = { { "Alt", "D" }, { "Ctrl", "D" } }
     end
 end
 
@@ -424,7 +433,7 @@ function ReaderDictionary:addToMainMenu(menu_items)
     end
 end
 
-function ReaderDictionary:onLookupWord(word, is_sane, boxes, highlight, link, tweak_buttons_func)
+function ReaderDictionary:onLookupWord(word, is_sane, boxes, highlight, link, dict_close_callback)
     logger.dbg("dict lookup word:", word, boxes)
     -- escape quotes and other funny characters in word
     word = self:cleanSelection(word, is_sane)
@@ -440,7 +449,7 @@ function ReaderDictionary:onLookupWord(word, is_sane, boxes, highlight, link, tw
 
     -- Wrapped through Trapper, as we may be using Trapper:dismissablePopen() in it
     Trapper:wrap(function()
-        self:stardictLookup(word, self.enabled_dict_names, not disable_fuzzy_search, boxes, link, tweak_buttons_func)
+        self:stardictLookup(word, self.enabled_dict_names, not disable_fuzzy_search, boxes, link, dict_close_callback)
     end)
     return true
 end
@@ -632,16 +641,21 @@ local function tidyMarkup(results)
             result.ifo_lang = ifo.lang
         end
         if ifo and ifo.is_html then
+            local dict_path = util.splitFilePathName(ifo.file)
             result.is_html = ifo.is_html
             result.css = ifo.css
             if ifo.fix_html_func then
-                local dict_path = util.splitFilePathName(ifo.file)
                 local ok, fixed_definition = pcall(ifo.fix_html_func, result.definition, dict_path)
                 if ok then
                     result.definition = fixed_definition
                 else
-                    logger.warn("Dict's user provided funcion failed:", fixed_definition)
+                    logger.warn("Dict's user provided function failed:", fixed_definition)
                 end
+            end
+
+            local res_dir = dict_path .. "res"
+            if lfs.attributes(res_dir, "mode") == "directory" then
+                result.dictionary_resource_directory = res_dir
             end
         else
             local def = result.definition
@@ -777,7 +791,14 @@ function ReaderDictionary:rawSdcv(words, dict_names, fuzzy_search, lookup_progre
             break -- don't do any more lookup on additional dict_dirs
         end
 
-        local args = {"./sdcv", "--utf8-input", "--utf8-output", "--json-output", "--non-interactive", "--data-dir", dict_dir}
+        local args = {
+            android and (android.nativeLibraryDir .. "/libsdcv.so") or "./sdcv",
+            "--utf8-input",
+            "--utf8-output",
+            "--json-output",
+            "--non-interactive",
+            "--data-dir", dict_dir,
+        }
         if not fuzzy_search then
             table.insert(args, "--exact-search")
         end
@@ -797,7 +818,7 @@ function ReaderDictionary:rawSdcv(words, dict_names, fuzzy_search, lookup_progre
         -- and a really bad selected text, can take up to 10 seconds.
         -- It is nice to be able to cancel it when noticing wrong text was
         -- selected.
-        -- Because sdcv starts outputing its output only at the end when it has
+        -- Because sdcv starts outputting its output only at the end when it has
         -- done its work, we can use Trapper:dismissablePopen() to cancel it as
         -- long as we are waiting for output.
         -- When fuzzy search is enabled, we have a lookup_progress_msg that can
@@ -812,11 +833,11 @@ function ReaderDictionary:rawSdcv(words, dict_names, fuzzy_search, lookup_progre
         cmd = cmd .. "; echo"
         -- NOTE: Bionic doesn't support rpath, but does honor LD_LIBRARY_PATH...
         --       Give it a shove so it can actually find the STL.
-        if Device:isAndroid() then
-            C.setenv("LD_LIBRARY_PATH", "./libs", 1)
+        if android then
+            C.setenv("LD_LIBRARY_PATH", android.nativeLibraryDir, 1)
         end
         local completed, results_str = Trapper:dismissablePopen(cmd, lookup_progress_msg)
-        if Device:isAndroid() then
+        if android then
             -- NOTE: It's unset by default, so this is perfectly fine.
             C.unsetenv("LD_LIBRARY_PATH")
         end
@@ -932,7 +953,7 @@ function ReaderDictionary:startSdcv(word, dict_names, fuzzy_search)
     return results
 end
 
-function ReaderDictionary:stardictLookup(word, dict_names, fuzzy_search, boxes, link, tweak_buttons_func)
+function ReaderDictionary:stardictLookup(word, dict_names, fuzzy_search, boxes, link, dict_close_callback)
     if word == "" then
         return
     end
@@ -957,6 +978,10 @@ function ReaderDictionary:stardictLookup(word, dict_names, fuzzy_search, boxes, 
                     self.highlight:clear(clear_id)
                 end)
             end
+
+            if dict_close_callback then
+                dict_close_callback()
+            end
         end)
         return
     end
@@ -973,7 +998,7 @@ function ReaderDictionary:stardictLookup(word, dict_names, fuzzy_search, boxes, 
                 lookup_cancelled = false,
             }
         }
-        self:showDict(word, nope, boxes, link)
+        self:showDict(word, nope, boxes, link, dict_close_callback)
         return
     end
 
@@ -989,19 +1014,23 @@ function ReaderDictionary:stardictLookup(word, dict_names, fuzzy_search, boxes, 
         if self.highlight then
             self.highlight:clear()
         end
+
+        if dict_close_callback then
+            dict_close_callback()
+        end
+
         return
     end
 
-    self:showDict(word, tidyMarkup(results), boxes, link, tweak_buttons_func)
+    self:showDict(word, tidyMarkup(results), boxes, link, dict_close_callback)
 end
 
-function ReaderDictionary:showDict(word, results, boxes, link, tweak_buttons_func)
+function ReaderDictionary:showDict(word, results, boxes, link, dict_close_callback)
     if results and results[1] then
         logger.dbg("showing quick lookup window", #DictQuickLookup.window_list+1, ":", word, results)
         self.dict_window = DictQuickLookup:new{
             ui = self.ui,
             highlight = self.highlight,
-            tweak_buttons_func = tweak_buttons_func,
             dialog = self.dialog,
             -- original lookup word
             word = word,
@@ -1021,6 +1050,7 @@ function ReaderDictionary:showDict(word, results, boxes, link, tweak_buttons_fun
             html_dictionary_link_tapped_callback = function(dictionary, html_link)
                 self:onHtmlDictionaryLinkTapped(dictionary, html_link)
             end,
+            dict_close_callback = dict_close_callback,
         }
         if self.lookup_progress_msg then
             -- If we have a lookup InfoMessage that ended up being displayed, make
@@ -1114,15 +1144,24 @@ function ReaderDictionary:downloadDictionary(dict, download_location, continue)
         --logger.dbg(headers)
         file_size = headers and headers["content-length"]
 
-        UIManager:show(ConfirmBox:new{
-            text =  T(_("Dictionary filesize is %1 (%2 bytes). Continue with download?"), util.getFriendlySize(file_size), util.getFormattedSize(file_size)),
-            ok_text =  _("Download"),
-            ok_callback = function()
-                -- call ourselves with continue = true
-                self:downloadDictionary(dict, download_location, true)
-            end,
-        })
-        return
+        if file_size then
+            UIManager:show(ConfirmBox:new{
+                text =  T(_("Dictionary filesize is %1 (%2 bytes). Continue with download?"), util.getFriendlySize(file_size), util.getFormattedSize(file_size)),
+                ok_text =  _("Download"),
+                ok_callback = function()
+                    -- call ourselves with continue = true
+                    self:downloadDictionary(dict, download_location, true)
+                end,
+            })
+            return
+        else
+            logger.dbg("ReaderDictionary: Request failed; response headers:", headers)
+            UIManager:show(InfoMessage:new{
+                text = _("Failed to fetch dictionary. Are you online?"),
+                --timeout = 3,
+            })
+            return false
+        end
     else
         UIManager:nextTick(function()
             UIManager:show(InfoMessage:new{

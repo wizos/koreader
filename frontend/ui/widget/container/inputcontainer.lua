@@ -41,6 +41,7 @@ local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local logger = require("logger")
 local Screen = Device.screen
 local _ = require("gettext")
 
@@ -71,10 +72,14 @@ function InputContainer:paintTo(bb, x, y)
 
     if not self.dimen then
         local content_size = self[1]:getSize()
-        self.dimen = Geom:new{x = 0, y = 0, w = content_size.w, h = content_size.h}
+        self.dimen = Geom:new{
+            x = x, y = y,
+            w = content_size.w, h = content_size.h,
+        }
+    else
+        self.dimen.x = x
+        self.dimen.y = y
     end
-    self.dimen.x = x
-    self.dimen.y = y
     if self.vertical_align == "center" then
         local content_size = self[1]:getSize()
         self[1]:paintTo(bb, x, y + math.floor((self.dimen.h - content_size.h)/2))
@@ -304,48 +309,63 @@ end
 --       [1] The most common implementation you'll see is a NOP for ReaderUI modules that defer gesture handling to ReaderUI.
 --           Notification also implements a simple one to dismiss notifications on any user input,
 --           which is something that doesn't impede our goal, which is why we don't need to deal with it.
-function InputContainer:onIgnoreTouchInput(toggle)
-    local Notification = require("ui/widget/notification")
-    if toggle == false then
-        -- Restore the proper onGesture handler if we disabled it
-        if InputContainer._onGesture then
-            InputContainer.onGesture = InputContainer._onGesture
-            InputContainer._onGesture = nil
-            Notification:notify("Restored touch input")
-        end
-    elseif toggle == true then
+function InputContainer:setIgnoreTouchInput(state)
+    logger.dbg("InputContainer:setIgnoreTouchInput", state)
+    if state == true then
         -- Replace the onGesture handler w/ the minimal one if that's not already the case
         if not InputContainer._onGesture then
             InputContainer._onGesture = InputContainer.onGesture
             InputContainer.onGesture = InputContainer._onGestureFiltered
-            Notification:notify("Disabled touch input")
+            -- Notify UIManager so it knows what to do if a random popup shows up
+            UIManager._input_gestures_disabled = true
+            logger.dbg("Disabled InputContainer gesture handler")
+
+            -- Notify our caller that the state changed
+            return true
+        end
+    elseif state == false then
+        -- Restore the proper onGesture handler if we disabled it
+        if InputContainer._onGesture then
+            InputContainer.onGesture = InputContainer._onGesture
+            InputContainer._onGesture = nil
+            UIManager._input_gestures_disabled = false
+            logger.dbg("Restored InputContainer gesture handler")
+
+            return true
+        end
+    end
+
+    -- We did not actually change the state
+    return false
+end
+
+-- And the matching Event handler
+function InputContainer:onIgnoreTouchInput(toggle)
+    local Notification = require("ui/widget/notification")
+    if toggle == true then
+        if self:setIgnoreTouchInput(true) then
+            Notification:notify(_("Disabled touch input"))
+        end
+    elseif toggle == false then
+        if self:setIgnoreTouchInput(false) then
+            Notification:notify(_("Restored touch input"))
         end
     else
         -- Toggle the current state
-        if InputContainer._onGesture then
-            return self:onIgnoreTouchInput(false)
-        else
-            return self:onIgnoreTouchInput(true)
-        end
+        return self:onIgnoreTouchInput(not UIManager._input_gestures_disabled)
     end
 
     -- We only affect the base class, once is enough ;).
     return true
 end
 
-function InputContainer:onResume()
-    -- Always restore touch input on resume, to avoid confusion for scatter-brained users ;).
-    -- It's also helpful when the IgnoreTouchInput event is emitted by Dispatcher through other means than Gestures.
-    self:onIgnoreTouchInput(false)
-end
-
 function InputContainer:onInput(input, ignore_first_hold_release)
     local InputDialog = require("ui/widget/inputdialog")
     self.input_dialog = InputDialog:new{
-        title = input.title or "",
+        title = input.title,
         input = input.input_func and input.input_func() or input.input,
-        input_hint = input.hint_func and input.hint_func() or input.hint or "",
-        input_type = input.type or "number",
+        input_hint = input.hint_func and input.hint_func() or input.hint,
+        input_type = input.input_type,
         buttons = input.buttons or {
             {
                 {
@@ -359,9 +379,10 @@ function InputContainer:onInput(input, ignore_first_hold_release)
                     text = input.ok_text or _("OK"),
                     is_enter_default = true,
                     callback = function()
-                        if input.deny_blank_input and self.input_dialog:getInputText() == "" then return end
-                        input.callback(self.input_dialog:getInputText())
-                        self:closeInputDialog()
+                        if input.allow_blank_input or self.input_dialog:getInputText() ~= "" then
+                            input.callback(self.input_dialog:getInputText())
+                            self:closeInputDialog()
+                        end
                     end,
                 },
             },

@@ -8,7 +8,7 @@ local CheckButton = require("ui/widget/checkbutton")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local DateTimeWidget = require("ui/widget/datetimewidget")
-local DoubleSpinWidget = require("/ui/widget/doublespinwidget")
+local DoubleSpinWidget = require("ui/widget/doublespinwidget")
 local DeviceListener = require("device/devicelistener")
 local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
@@ -16,6 +16,7 @@ local FFIUtil = require("ffi/util")
 local Font = require("ui/font")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
+local Math = require("optmath")
 local Notification = require("ui/widget/notification")
 local SpinWidget = require("ui/widget/spinwidget")
 local SunTime = require("suntime")
@@ -87,14 +88,29 @@ function AutoWarmth:init()
     end
 
     -- Fix entries not in ascending order (only happens by manual editing of settings.reader.lua)
-    for i = 1, #self.scheduler_times - 1 do
-        if self.scheduler_times[i] > self.scheduler_times[i + 1] then
-            self.scheduler_times[i + 1] = self.scheduler_times[i]
+    local i = 1
+
+    -- Find first not disabled entry. (`<` is OK here.)
+    while i < midnight_index and not self.scheduler_times[i] do
+        i = i + 1
+    end
+    while i < midnight_index do
+        local j = i + 1
+        -- Find next not disabled entry
+        while j <= midnight_index and not self.scheduler_times[j] do
+            j = j + 1
+        end
+        -- Fix the found the next not disabled entry if necessary.
+        if j <= midnight_index and self.scheduler_times[j] and
+            self.scheduler_times[i] > self.scheduler_times[j] then
+
+            self.scheduler_times[j] = self.scheduler_times[i]
             logger.warn("AutoWarmth: scheduling times fixed.")
         end
+        i = j
     end
 
-    -- schedule recalculation shortly afer midnight
+    -- schedule recalculation shortly after midnight
     self:scheduleMidnightUpdate()
 end
 
@@ -103,6 +119,15 @@ function AutoWarmth:onDispatcherRegisterActions()
         {category="none", event="ShowEphemeris", title=_("Show ephemeris"), general=true})
     Dispatcher:registerAction("auto_warmth_off",
         {category="none", event="AutoWarmthOff", title=_("Auto warmth off"), screen=true})
+    Dispatcher:registerAction("auto_warmth_activate_sun",
+        {category="none", event="AutoWarmthMode", arg=activate_sun, title=_("Auto warmth use sun position"), screen=true})
+    Dispatcher:registerAction("auto_warmth_activate_schedule",
+        {category="none", event="AutoWarmthMode", arg=activate_schedule, title=_("Auto warmth use schedule"), screen=true})
+    Dispatcher:registerAction("auto_warmth_activate_closer_midnight",
+        {category="none", event="AutoWarmthMode", arg=activate_closer_midnight, title=_("Auto warmth use closer midnight"), screen=true})
+    Dispatcher:registerAction("auto_warmth_activate_closer_noon",
+        {category="none", event="AutoWarmthMode", arg=activate_closer_noon, title=_("Auto warmth use closer noon"), screen=true})
+
     Dispatcher:registerAction("auto_warmth_cycle_trough",
         {category="none", event="AutoWarmthMode", title=_("Auto warmth cycle through modes"), screen=true})
 end
@@ -112,17 +137,19 @@ function AutoWarmth:onShowEphemeris()
 end
 
 function AutoWarmth:onAutoWarmthOff()
-    self.activate = 0
-    G_reader_settings:saveSetting("autowarmth_activate", self.activate)
-    Notification:notify(_("Auto warmth turned off"))
-    self:scheduleMidnightUpdate()
+    self:onAutoWarmthMode(0)
 end
 
-function AutoWarmth:onAutoWarmthMode()
-    if self.activate > 0 then
-        self.activate = self.activate - 1
+ -- select one mode of autowarmth directly
+function AutoWarmth:onAutoWarmthMode(forced_method)
+    if forced_method then
+        self.activate = Math.clamp(forced_method, 0, activate_closer_midnight)
     else
-        self.activate = activate_closer_midnight
+        if self.activate > 0 then
+            self.activate = self.activate - 1
+        else
+            self.activate = activate_closer_midnight
+        end
     end
     local notify_text
     if self.activate == 0 then
@@ -378,13 +405,15 @@ function AutoWarmth:scheduleToggleFrontlight(now_s)
     end
     -- Reset user fl toggles at sunset or sunrise with offset, as `scheduleNextWarmthChange` gets called only
     -- on scheduled warmth changes.
-    local sunset_in_s = self.current_times_h[7] * 3600 - self.fl_off_during_day_offset_s - now_s
+    local ss = self.current_times_h[7]
+    local sunset_in_s =  ss and (ss * 3600 - self.fl_off_during_day_offset_s - now_s) or -1
     if sunset_in_s >= 0 then -- first check if we are before sunset
         UIManager:scheduleIn(sunset_in_s, self.setFrontlight, self, true, false)
-        local sunrise_in_s = self.current_times_h[5] * 3600 + self.fl_off_during_day_offset_s - now_s
-        if sunrise_in_s >= 0 then -- second check if we are before sunrise
-            UIManager:scheduleIn(sunrise_in_s, self.setFrontlight, self, false, false)
-        end
+    end
+    local sr = self.current_times_h[5]
+    local sunrise_in_s = sr and (sr * 3600 + self.fl_off_during_day_offset_s - now_s) or -1
+    if sunrise_in_s >= 0 then -- second check if we are before sunrise
+        UIManager:scheduleIn(sunrise_in_s, self.setFrontlight, self, false, false)
     end
 end
 
@@ -399,14 +428,16 @@ function AutoWarmth:setFrontlight(enable, keep_user_toggle)
         return
     end
 
-    if enable then
-        Powerd:turnOnFrontlight()
-        AutoWarmth.fl_turned_off = false
-    else
-        Powerd:turnOffFrontlight()
-        AutoWarmth.fl_turned_off = true
-        UIManager:broadcastEvent(Event:new("FrontlightTurnedOff")) -- used e.g. in AutoDim
-    end
+    UIManager:scheduleIn(0.01, function()
+        if enable then
+            Powerd:turnOnFrontlight()
+            AutoWarmth.fl_turned_off = false
+        else
+            Powerd:turnOffFrontlight()
+            AutoWarmth.fl_turned_off = true
+            UIManager:broadcastEvent(Event:new("FrontlightTurnedOff")) -- used e.g. in AutoDim
+        end
+    end)
 end
 
 -- toggles Frontlight on or off, depending on `now_s`
@@ -418,8 +449,10 @@ function AutoWarmth:toggleFrontlight(now_s)
     end
 
     now_s = now_s or SunTime:getTimeInSec()
-    local sunrise_in_s = self.current_times_h[5] * 3600 + self.fl_off_during_day_offset_s - now_s
-    local sunset_in_s = self.current_times_h[7] * 3600 - self.fl_off_during_day_offset_s - now_s
+    local sr = self.current_times_h[5]
+    local ss = self.current_times_h[7]
+    local sunrise_in_s = sr and (sr * 3600 + self.fl_off_during_day_offset_s - now_s) or 0
+    local sunset_in_s = sr and (ss * 3600 - self.fl_off_during_day_offset_s - now_s) or 0
 
     self:setFrontlight(sunrise_in_s > 0 or sunset_in_s < 0)
 end
@@ -493,7 +526,9 @@ function AutoWarmth:setWarmth(val, force_warmth)
     -- A value > 100 means to set night mode and set warmth to maximum.
     -- We use an offset of 1000 to "flag", that night mode is on.
     if val then
-        DeviceListener:onSetNightMode(self.control_nightmode and val > 100)
+        if self.control_nightmode then
+            DeviceListener:onSetNightMode(val > 100)
+        end
 
         if self.control_warmth and Device:hasNaturalLight() then
             val = math.min(val, 100) -- "mask" night mode
@@ -641,7 +676,7 @@ function AutoWarmth:getFlOffDuringDayMenu()
   • off after sunrise and
   • on before sunset.]],
                     ok_always_enabled = true,
-                    -- read the saved setting, as this get's not overwritten by toggling easy_mode
+                    -- read the saved setting, as this gets overwritten by toggling easy_mode
                     value = G_reader_settings:readSetting("autowarmth_fl_off_during_day_offset_s", 0) * (1/60),
                     value_min = -15,
                     value_max = 30,
@@ -1233,8 +1268,8 @@ function AutoWarmth:showTimesInfo(title, location, activator, request_easy)
             add_line(0, "", not self.fl_off_during_day) ..
             add_line(0, _("Toggle frontlight off between"), not self.fl_off_during_day) ..
             add_line(4, T(_("%1 and %2"),
-                        self:hoursToClock(times[5] + self.fl_off_during_day_offset_s * (1/3600)),
-                        self:hoursToClock(times[7] - self.fl_off_during_day_offset_s * (1/3600))),
+                times[5] and self:hoursToClock(times[5] + self.fl_off_during_day_offset_s * (1/3600)) or "",
+                times[7] and self:hoursToClock(times[7] - self.fl_off_during_day_offset_s * (1/3600)) or ""),
                     not self.fl_off_during_day),
     })
 end

@@ -202,14 +202,14 @@ if G_reader_settings:isTrue("color_rendering") and not Device:hasColorScreen() t
         text = _("Color rendering is mistakenly enabled on your grayscale device.\nThis will subtly break some features, and adversely affect performance."),
         cancel_text = _("Ignore"),
         cancel_callback = function()
-                return
+            return
         end,
         ok_text = _("Disable"),
         ok_callback = function()
-                local Event = require("ui/event")
-                G_reader_settings:delSetting("color_rendering")
-                CanvasContext:setColorRenderingEnabled(false)
-                UIManager:broadcastEvent(Event:new("ColorRenderingUpdate"))
+            local Event = require("ui/event")
+            G_reader_settings:delSetting("color_rendering")
+            CanvasContext:setColorRenderingEnabled(false)
+            UIManager:broadcastEvent(Event:new("ColorRenderingUpdate"))
         end,
     })
 end
@@ -271,20 +271,11 @@ else
         -- Always open FM modules on top of filemanager, so closing 'em doesn't result in an exit
         -- because of an empty widget stack, and so they can interact with the FM instance as expected.
         if start_with == "history" then
-            local FileManagerHistory = require("apps/filemanager/filemanagerhistory")
-            FileManagerHistory:new{
-                ui = FileManager.instance,
-            }:onShowHist()
+            FileManager.instance.history:onShowHist()
         elseif start_with == "favorites" then
-            local FileManagerCollection = require("apps/filemanager/filemanagercollection")
-            FileManagerCollection:new{
-                ui = FileManager.instance,
-            }:onShowColl("favorites")
+            FileManager.instance.collections:onShowColl()
         elseif start_with == "folder_shortcuts" then
-            local FileManagerShortcuts = require("apps/filemanager/filemanagershortcuts")
-            FileManagerShortcuts:new{
-                ui = FileManager.instance,
-            }:onShowFolderShortcutsDialog()
+            FileManager.instance.folder_shortcuts:onShowFolderShortcutsDialog()
         end
         exit_code = UIManager:run()
     end

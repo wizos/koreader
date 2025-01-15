@@ -33,6 +33,14 @@ local CreDocument = Document:extend{
     monospace_font = "Droid Sans Mono",
     header_font = "Noto Sans",
 
+    prop_to_cre_prop = { -- see cre lvtinydom.h
+        title        = "doc.title",
+        authors      = "doc.authors",
+        series       = "doc.series.name",
+        series_index = "doc.series.number",
+        identifiers  = "doc.identifiers",
+    },
+
     -- Reasons for the fallback font ordering:
     -- - Noto Sans CJK SC before FreeSans/Serif, as it has nice and larger
     --   symbol glyphs for Wikipedia EPUB headings than both Free fonts)
@@ -45,7 +53,7 @@ local CreDocument = Document:extend{
     --   in any fallback font. Also, we don't know if the user is using
     --   a serif or a sans main font, so choosing to have one of these early
     --   might not be the best decision (and moving them before FreeSans would
-    --   require one to set FreeSans as fallback to get its nicer glyphes, which
+    --   require one to set FreeSans as fallback to get its nicer glyphs, which
     --   would override Noto Sans CJK good symbol glyphs with smaller ones
     --   (Noto Sans & Serif do not have these symbol glyphs).
     fallback_fonts = { -- const
@@ -59,7 +67,7 @@ local CreDocument = Document:extend{
         "Noto Sans",
     },
 
-    default_css = "./data/cr3.css",
+    default_css = nil,
     provider = "crengine",
     provider_name = "Cool Reader Engine",
 
@@ -68,20 +76,6 @@ local CreDocument = Document:extend{
     page_in_flow = nil, -- table
     last_linear_page = nil,
 }
-
--- NuPogodi, 20.05.12: inspect the zipfile content
-function CreDocument:zipContentExt(fname)
-    local std_out = io.popen("unzip ".."-qql \""..fname.."\"")
-    if std_out then
-        local size, ext
-        for line in std_out:lines() do
-            size, ext = string.match(line, "%s+(%d+)%s+.+%.([^.]+)")
-            if size and ext then break end
-        end
-        std_out:close()
-        if ext then return string.lower(ext) end
-    end
-end
 
 function CreDocument:cacheInit()
     -- remove legacy cr3cache directory
@@ -108,6 +102,15 @@ end
 function CreDocument:engineInit()
     if not engine_initialized then
         cre = require("libs/libkoreader-cre")
+
+        -- When forking to execute any stuff in a sub-process,
+        -- as that stuff may not care about properly closing
+        -- the document, skip cre.cpp finalizer to avoid any
+        -- assertion failure.
+        require("ffi/util").addRunInSubProcessAfterForkFunc("cre_skip_teardown", function()
+            cre.setSkipTearDown(true)
+        end)
+
         -- initialize cache
         self:cacheInit()
 
@@ -133,6 +136,10 @@ function CreDocument:engineInit()
         -- and bold text with the font_base_weight setting set to its default value of 0 (=400).
         cre.regularizeRegisteredFontsWeights(true) -- true to print what modifications were made
 
+        -- Let our default font (even if we don't have a document) be known to crengine's FontManager
+        -- (self:setFontFace(self.default_font) would need a credocument to be loaded)
+        cre.setAsPreferredFontWithBias(self.default_font, 1 + 128*5 + 256*5)
+
         -- Set up bias for some specific fonts
         self:setOtherFontBiases()
 
@@ -149,24 +156,14 @@ function CreDocument:init()
     self.flows = {}
     self.page_in_flow = {}
 
-    local file_type = string.lower(string.match(self.file, ".+%.([^.]+)"))
-    if file_type == "zip" then
-        -- NuPogodi, 20.05.12: read the content of zip-file
-        -- and return extention of the 1st file
-        file_type = self:zipContentExt(self.file) or "unknown"
-    end
-
     -- June 2018: epub.css has been cleaned to be more conforming to HTML specs
-    -- and to not include class name based styles (with conditional compatiblity
+    -- and to not include class name based styles (with conditional compatibility
     -- styles for previously opened documents). It should be usable on all
     -- HTML based documents, except FB2 which has some incompatible specs.
     -- The other css files (htm.css, rtf.css...) have not been updated in the
     -- same way, and are kept as-is for when a previously opened document
     -- requests one of them.
-    self.default_css = "./data/epub.css"
-    if file_type == "fb2" or file_type == "fb3" then
-        self.default_css = "./data/fb2.css"
-    end
+    self.default_css = self.is_fb2 and "./data/fb2.css" or "./data/epub.css"
 
     -- This mode must be the same as the default one set as ReaderView.view_mode
     self._view_mode = G_defaults:readSetting("DCREREADER_VIEW_MODE") == "scroll" and self.SCROLL_VIEW_MODE or self.PAGE_VIEW_MODE
@@ -214,6 +211,14 @@ end
 
 function CreDocument:getDocumentProps()
     return self._document:getDocumentProps()
+end
+
+function CreDocument:setAltDocumentProp(prop, value)
+    logger.dbg("CreDocument: set alt document prop", prop, value)
+    if type(value) == "number" then -- series index
+        value = tostring(value)
+    end
+    self._document:setAltDocumentProp(self.prop_to_cre_prop[prop], value)
 end
 
 function CreDocument:setupDefaultView()
@@ -294,11 +299,6 @@ function CreDocument:loadDocument(full_document)
     if not self._loaded then
         local only_metadata = full_document == false
         logger.dbg("CreDocument: loading document...")
-        if only_metadata then
-            -- Setting a default font before loading document
-            -- actually do prevent some crashes
-            self:setFontFace(self.default_font)
-        end
         if self._document:loadDocument(self.file, only_metadata) then
             self._loaded = true
             logger.dbg("CreDocument: loading done.")
@@ -602,7 +602,7 @@ function CreDocument:getImageFromPosition(pos, want_frames, accept_cre_scalable_
     end
 end
 
-function CreDocument:getWordFromPosition(pos)
+function CreDocument:getWordFromPosition(pos, do_not_draw_selection)
     local wordbox = {
         page = self._document:getCurrentPage(),
     }
@@ -615,7 +615,11 @@ function CreDocument:getWordFromPosition(pos)
     local word_found = false
     local box_found = false
 
-    local text_range = self._document:getTextFromPositions(pos.x, pos.y, pos.x, pos.y)
+    local drawSelection, drawSegmentedSelection
+    if do_not_draw_selection then
+        drawSelection, drawSegmentedSelection = false, false
+    end
+    local text_range = self._document:getTextFromPositions(pos.x, pos.y, pos.x, pos.y, drawSelection, drawSegmentedSelection)
     logger.dbg("CreDocument: get text range", text_range)
     if text_range then
         if text_range.text and text_range.text ~= "" then
@@ -684,12 +688,12 @@ function CreDocument:getTextFromPositions(pos0, pos1, do_not_draw_selection)
         drawSelection, drawSegmentedSelection)
     logger.dbg("CreDocument: get text range", text_range)
     if text_range then
-        -- local line_boxes = self:getScreenBoxesFromPositions(text_range.pos0, text_range.pos1)
+        local line_boxes = self:getScreenBoxesFromPositions(text_range.pos0, text_range.pos1)
         return {
             text = text_range.text,
             pos0 = text_range.pos0,
             pos1 = text_range.pos1,
-            --sboxes = line_boxes,     -- boxes on screen
+            sboxes = line_boxes, -- boxes on screen
         }
     end
 end
@@ -740,7 +744,7 @@ function CreDocument:getNextVisibleChar(xp)
     return self._document:getNextVisibleChar(xp)
 end
 
-function CreDocument:getSelectedWordContext(word, nb_words, pos0, pos1)
+function CreDocument:getSelectedWordContext(word, nb_words, pos0, pos1, restore_selection)
     local pos_start = pos0
     local pos_end = pos1
 
@@ -758,6 +762,15 @@ function CreDocument:getSelectedWordContext(word, nb_words, pos0, pos1)
 
     local prev = self:getTextFromXPointers(pos_start, pos0)
     local next = self:getTextFromXPointers(pos1, pos_end)
+
+    if restore_selection then
+        -- If pos0..pos1 was highlighted by crengine, getTextFromXPointers()
+        -- will have cleared this original selection, and crengine would then
+        -- not draw it any longer on next refresh.
+        -- If requested because it was highlighted, have crengine know again
+        -- about what should be selected and drawn.
+        self:getTextFromXPointers(pos0, pos1, true)
+    end
 
     return prev, next
 end
@@ -1026,7 +1039,7 @@ function CreDocument:setFontFace(new_font_face)
         -- don't have the font.
         cre.setAsPreferredFontWithBias(new_font_face, 1 + 128*5 + 256*5)
 
-        -- The above call has resetted all other biases, so re-set our other ones
+        -- The above call has reset all other biases, so re-set our other ones
         self:setOtherFontBiases()
     end
 end
@@ -1168,7 +1181,7 @@ function CreDocument:setRenderDPI(value)
 end
 
 function CreDocument:setRenderScaleFontWithDPI(toggle)
-    -- wheter to scale font with DPI, or keep the current size
+    -- whether to scale font with DPI, or keep the current size
     logger.dbg("CreDocument: set render scale font with dpi", toggle)
     self._document:setIntProperty("crengine.render.scale.font.with.dpi", toggle)
 end
@@ -1352,6 +1365,11 @@ function CreDocument:setBatteryState(state)
     self._document:setBatteryState(state)
 end
 
+function CreDocument:setPageInfoOverride(pageinfo)
+    logger.dbg("CreDocument: set page info", pageinfo)
+    self._document:setPageInfoOverride(pageinfo)
+end
+
 function CreDocument:isXPointerInCurrentPage(xp)
     logger.dbg("CreDocument: check xpointer in current page", xp)
     return self._document:isXPointerInCurrentPage(xp)
@@ -1383,10 +1401,14 @@ function CreDocument:getAndClearRegexSearchError()
     return retval
 end
 
-function CreDocument:findText(pattern, origin, reverse, caseInsensitive, page, regex, max_hits)
-    logger.dbg("CreDocument: find text", pattern, origin, reverse, caseInsensitive, regex, max_hits)
-    return self._document:findText(
-        pattern, origin, reverse, caseInsensitive and 1 or 0, regex and 1 or 0, max_hits or 200)
+function CreDocument:findText(pattern, origin, direction, case_insensitive, page, regex, max_hits)
+    logger.dbg("CreDocument: find text", pattern, origin, direction == 1, case_insensitive, regex, max_hits)
+    return self._document:findText(pattern, origin, direction == 1, case_insensitive, regex, max_hits)
+end
+
+function CreDocument:findAllText(pattern, case_insensitive, nb_context_words, max_hits, regex)
+    logger.dbg("CreDocument: find all text", pattern, case_insensitive, regex, max_hits, true, nb_context_words)
+    return self._document:findAllText(pattern, case_insensitive, regex, max_hits, true, nb_context_words)
 end
 
 function CreDocument:enableInternalHistory(toggle)
@@ -1572,7 +1594,7 @@ function CreDocument:setupCallCache()
     local do_log = false
 
     -- Beware below for luacheck warnings "shadowing upvalue argument 'self'":
-    -- the 'self' we got and use here, and the one we may get implicitely
+    -- the 'self' we got and use here, and the one we may get implicitly
     -- as first parameter of the methods we define or redefine, are actually
     -- the same, but luacheck doesn't know that and would logically complain.
     -- So, we define our helpers (self._callCache*) as functions and not methods:
@@ -1777,6 +1799,8 @@ function CreDocument:setupCallCache()
 
             -- Assume all set* may change rendering
             if name == "setBatteryState" then no_wrap = true -- except this one
+            elseif name == "setPageInfoOverride" then no_wrap = true -- and this one
+            elseif name == "setViewMode" then no_wrap = true -- and this one
             elseif name:sub(1,3) == "set" then add_reset = true
             elseif name:sub(1,6) == "toggle" then add_reset = true
             elseif name:sub(1,6) == "update" then add_reset = true
@@ -1859,13 +1883,13 @@ function CreDocument:setupCallCache()
             if add_reset then
                 self[name] = function(...)
                     -- logger.dbg("callCache:", name, "called with", select(2,...))
-                    if do_log then logger.dbg("callCache:", name, "reseting cache") end
+                    if do_log then logger.dbg("callCache:", name, "resetting cache") end
                     self._callCacheReset()
                     return func(...)
                 end
             elseif add_buffer_trash then
                 self[name] = function(...)
-                    if do_log then logger.dbg("callCache:", name, "reseting buffer") end
+                    if do_log then logger.dbg("callCache:", name, "resetting buffer") end
                     self._callCacheSet("current_buffer_tag", nil)
                     return func(...)
                 end

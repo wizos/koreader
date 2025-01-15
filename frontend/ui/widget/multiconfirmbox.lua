@@ -91,8 +91,6 @@ function MultiConfirmBox:init()
 
     local button_table = ButtonTable:new{
         width = content:getSize().w,
-        button_font_face = "cfont",
-        button_font_size = 20,
         buttons = {
             {
                 {
@@ -131,7 +129,6 @@ function MultiConfirmBox:init()
         MovableContainer:new{
             FrameContainer:new{
                 background = Blitbuffer.COLOR_WHITE,
-                margin = self.margin,
                 radius = Size.radius.window,
                 padding = self.padding,
                 padding_bottom = 0, -- no padding below buttontable

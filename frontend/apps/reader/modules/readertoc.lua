@@ -29,9 +29,8 @@ local ReaderToc = InputContainer:extend{
     collapsed_toc = nil, -- table
     collapse_depth = 2,
     expanded_nodes = nil, -- table
-    toc_menu_title = _("Table of contents"),
-    alt_toc_menu_title = _("Table of contents *"),
     toc_items_per_page_default = 14,
+    alt_toc_symbol = "\u{E298}" -- two-folders in circle (custom toc uses a pen in square symbol)
 }
 
 function ReaderToc:init()
@@ -61,9 +60,22 @@ end
 function ReaderToc:onGesture() end
 
 function ReaderToc:registerKeyEvents()
-    if Device:hasKeyboard() then
-        self.key_events.ShowToc = { { "T" } }
+    if Device:hasScreenKB() then
+        self.key_events.ShowToc = { { "ScreenKB", "Up" } }
+    elseif Device:hasKeyboard() then
+        self.key_events.ShowToc = { { "T" }, { "Shift", "Up" } }
     end
+end
+
+function ReaderToc:getTitle()
+    local title = _("Table of contents")
+    -- Handmade ToC has precedence over alternative ToC
+    if self.ui.handmade:isHandmadeTocEnabled() then
+        title = title .. " " .. self.ui.handmade.custom_toc_symbol
+    elseif self.ui.document:isTocAlternativeToc() then
+        title = title .. " " .. self.alt_toc_symbol
+    end
+    return title
 end
 
 ReaderToc.onPhysicalKeyboardConnected = ReaderToc.registerKeyEvents
@@ -94,6 +106,7 @@ end
 
 function ReaderToc:resetToc()
     self.toc = nil
+    self.toc_menu_items_built = false
     self.toc_depth = nil
     self.ticks = nil
     self.ticks_flattened = nil
@@ -170,7 +183,7 @@ function ReaderToc:validateAndFixToc()
     local first = 1
     local last = #toc
 
-    -- For testing: shuffle a bit a valid TOC and make it randomely invalid
+    -- For testing: shuffle a bit a valid TOC and make it randomly invalid
     -- for i = first, last do
     --     toc[i].page = toc[i].page + math.random(10) - 5
     -- end
@@ -180,8 +193,10 @@ function ReaderToc:validateAndFixToc()
     local has_bogus
     local cur_page = 0
     local max_depth = 0
+    local cur_seq_by_level = {}
     for i = first, last do
-        local page = toc[i].page
+        local item = toc[i]
+        local page = item.page
         if page < cur_page then
             has_bogus = true
             break
@@ -189,9 +204,15 @@ function ReaderToc:validateAndFixToc()
         cur_page = page
         -- Use this loop to compute max_depth here (if has_bogus,
         -- we will recompute it in the loop below)
-        if toc[i].depth > max_depth then
-            max_depth = toc[i].depth
+        local depth = item.depth
+        if depth > max_depth then
+            max_depth = depth
         end
+        -- Also use this loop to compute seq_in_level for each
+        -- item, needed by BookMap with alternative theme
+        local seq = (cur_seq_by_level[depth] or 0) + 1
+        item.seq_in_level = seq
+        cur_seq_by_level[depth] = seq
     end
     if not has_bogus then -- no TOC items, or all are valid
         logger.dbg("validateAndFixToc(): TOC is fine")
@@ -203,6 +224,7 @@ function ReaderToc:validateAndFixToc()
     -- Bad ordering previously noticed: try to fix the wrong items' page
     -- by setting it to the previous or next good item page.
     max_depth = 0 -- recompute this
+    cur_seq_by_level = {}
     local nb_bogus = 0
     local nb_fixed_pages = 0
     -- We fix only one bogus item per loop, taking the option that
@@ -215,10 +237,17 @@ function ReaderToc:validateAndFixToc()
     -- (These cases are met in the following code with cur_page=57 and page=6)
     cur_page = 0
     for i = first, last do
-        if toc[i].depth > max_depth then
-            max_depth = toc[i].depth
+        local item = toc[i]
+        -- Recompute max_depth and item's seq_in_level
+        local depth = item.depth
+        if depth > max_depth then
+            max_depth = depth
         end
-        local page = toc[i].fixed_page or toc[i].page
+        local seq = (cur_seq_by_level[depth] or 0) + 1
+        item.seq_in_level = seq
+        cur_seq_by_level[depth] = seq
+        -- Look for bogus page
+        local page = item.fixed_page or item.page
         if page >= cur_page then
             cur_page = page
         else
@@ -272,7 +301,7 @@ function ReaderToc:validateAndFixToc()
                     logger.dbg("  fix next", j, toc[j].page, "=>", fixed_page)
                 end
             end
-            cur_page = toc[i].fixed_page or toc[i].page
+            cur_page = item.fixed_page or item.page
         end
     end
     if nb_bogus > 0 then
@@ -288,6 +317,37 @@ function ReaderToc:validateAndFixToc()
     self.toc_depth = max_depth
 end
 
+function ReaderToc:completeTocWithChapterLengths()
+    local toc = self.toc
+    local first = 1
+    local last = #toc
+    if last == 0 then
+        return
+    end
+    local prev_item_by_level = {}
+    for i = first, last do
+        local item = toc[i]
+        local page = item.page
+        local depth = item.depth
+        for j=#prev_item_by_level, depth, -1 do
+            local prev_item = prev_item_by_level[j]
+            if prev_item then
+                prev_item.chapter_length = page - prev_item.page
+            end
+            prev_item_by_level[j] = nil
+        end
+        prev_item_by_level[depth] = item
+    end
+    -- Set the length of the last ones
+    local page = self.ui.document:getPageCount()
+    for j=#prev_item_by_level, 0, -1 do
+        local prev_item = prev_item_by_level[j]
+        if prev_item then
+            prev_item.chapter_length = page - prev_item.page
+        end
+    end
+end
+
 function ReaderToc:getTocIndexByPage(pn_or_xp, skip_ignored_ticks)
     self:fillToc()
     if #self.toc == 0 then return end
@@ -295,7 +355,7 @@ function ReaderToc:getTocIndexByPage(pn_or_xp, skip_ignored_ticks)
     if type(pn_or_xp) == "string" then
         return self:getAccurateTocIndexByXPointer(pn_or_xp, skip_ignored_ticks)
     end
-    local prev_index = 1
+    local prev_index = 0
     for _k,_v in ipairs(self.toc) do
         if not skip_ignored_ticks or not self.toc_ticks_ignored_levels[_v.depth] then
             if _v.page == pageno then
@@ -310,7 +370,7 @@ function ReaderToc:getTocIndexByPage(pn_or_xp, skip_ignored_ticks)
             prev_index = _k
         end
     end
-    return prev_index
+    return prev_index > 0 and prev_index or nil
 end
 
 function ReaderToc:getAccurateTocIndexByXPointer(xptr, skip_ignored_ticks)
@@ -358,6 +418,27 @@ function ReaderToc:getTocTitleByPage(pn_or_xp)
     else
         return ""
     end
+end
+
+function ReaderToc:getFullTocTitleByPage(pn_or_xp)
+    local chapters = {}
+    local toc_ticks_ignored_levels_orig = {}
+    local toc_chapter_title_bind_to_ticks_orig = self.toc_chapter_title_bind_to_ticks -- backup the flag
+    self.toc_chapter_title_bind_to_ticks = true -- honor self.toc_ticks_ignored_levels
+    local max_depth = self:getMaxDepth()
+    for depth = max_depth, 1, -1 do
+        toc_ticks_ignored_levels_orig[depth] = self.toc_ticks_ignored_levels[depth] -- backup the level
+        -- ignore the level if it should be ignored due to original settings
+        self.toc_ticks_ignored_levels[depth] = self.toc_ticks_ignored_levels[depth] and toc_chapter_title_bind_to_ticks_orig
+        local chapter = self:getTocTitleByPage(pn_or_xp)
+        if chapter ~= "" and chapter ~= chapters[1] then
+            table.insert(chapters, 1, chapter)
+        end
+        self.toc_ticks_ignored_levels[depth] = true -- ignore the level on next iterations
+    end
+    self.toc_chapter_title_bind_to_ticks = toc_chapter_title_bind_to_ticks_orig -- restore the flag
+    table.move(toc_ticks_ignored_levels_orig, 1, max_depth, 1, self.toc_ticks_ignored_levels) -- restore all levels
+    return chapters
 end
 
 function ReaderToc:getTocTitleOfCurrentPage()
@@ -543,78 +624,54 @@ function ReaderToc:isChapterEnd(cur_pageno)
 end
 
 function ReaderToc:getChapterPageCount(pageno)
-    if self.ui.document:hasHiddenFlows() then
-        -- Count pages until new chapter, starting by going backwards to the beginning of the current chapter if necessary
-        local page_count = 1
-        if not self:isChapterStart(pageno) then
-            local test_page = self.ui.document:getPrevPage(pageno)
-            while test_page > 0 do
-                page_count = page_count + 1
-                if self:isChapterStart(test_page) then
-                    break
-                end
-                test_page = self.ui.document:getPrevPage(test_page)
+    local next_chapter = self:getNextChapter(pageno) or self.ui.document:getPageCount() + 1
+    local previous_chapter = self:isChapterStart(pageno) and pageno or self:getPreviousChapter(pageno) or 1
+    local page_count = next_chapter - previous_chapter
+    if self.ui.document:hasHiddenFlows() and self.ui.document:getPageFlow(pageno) == 0 then
+        -- If current page in a hidden flow, return the full amount of pages in this chapter.
+        -- Otherwise, count only pages in the main flow
+        for page = previous_chapter, next_chapter - 1 do
+            if self.ui.document:getPageFlow(page) ~= 0 then
+                page_count = page_count - 1
             end
         end
-
-        -- Then forward
-        local test_page = self.ui.document:getNextPage(pageno)
-        while test_page > 0 do
-            page_count = page_count + 1
-            if self:isChapterStart(test_page) then
-                return page_count - 1
-            end
-            test_page = self.ui.document:getNextPage(test_page)
-        end
-    else
-        local next_chapter = self:getNextChapter(pageno) or self.ui.document:getPageCount() + 1
-        local previous_chapter = self:isChapterStart(pageno) and pageno or self:getPreviousChapter(pageno) or 1
-        local page_count = next_chapter - previous_chapter
-        return page_count
     end
+    return page_count
 end
 
 function ReaderToc:getChapterPagesLeft(pageno)
-    if self.ui.document:hasHiddenFlows() then
-        -- Count pages until new chapter
-        local pages_left = 0
-        local test_page = self.ui.document:getNextPage(pageno)
-        while test_page > 0 do
-            pages_left = pages_left + 1
-            if self:isChapterStart(test_page) then
-                return pages_left - 1
-            end
-            test_page = self.ui.document:getNextPage(test_page)
-        end
-    else
-        local next_chapter = self:getNextChapter(pageno)
-        if next_chapter then
-            next_chapter = next_chapter - pageno - 1
-        end
-        return next_chapter
+    local next_chapter = self:getNextChapter(pageno)
+    if not next_chapter then
+        -- (ReaderFooter deals itself with nil and pageno in last chapter)
+        return
     end
+    local pages_left = next_chapter - pageno - 1
+    if self.ui.document:hasHiddenFlows() and self.ui.document:getPageFlow(pageno) == 0 then
+        for page = pageno, next_chapter - 1 do
+            if self.ui.document:getPageFlow(page) ~= 0 then
+                pages_left = pages_left - 1
+            end
+        end
+    end
+    return pages_left
 end
 
 function ReaderToc:getChapterPagesDone(pageno)
     if self:isChapterStart(pageno) then return 0 end
-    if self.ui.document:hasHiddenFlows() then
-        -- Count pages until chapter start
-        local pages_done = 0
-        local test_page = self.ui.document:getPrevPage(pageno)
-        while test_page > 0 do
-            pages_done = pages_done + 1
-            if self:isChapterStart(test_page) then
-                return pages_done
-            end
-            test_page = self.ui.document:getPrevPage(test_page)
-        end
-    else
-        local previous_chapter = self:getPreviousChapter(pageno)
-        if previous_chapter then
-            previous_chapter = pageno - previous_chapter
-        end
-        return previous_chapter
+    local previous_chapter = self:getPreviousChapter(pageno)
+    if not previous_chapter then
+        -- (ReaderFooter deals itself with nil and pageno not yet in first chapter)
+        return
     end
+    local pages_done = pageno - previous_chapter
+    if self.ui.document:hasHiddenFlows() and self.ui.document:getPageFlow(pageno) == 0 then
+        for page = previous_chapter, pageno - 1 do
+            if self.ui.document:getPageFlow(page) ~= 0 then
+                pages_done = pages_done - 1
+            end
+        end
+    end
+    return pages_done
 end
 
 function ReaderToc:updateCurrentNode()
@@ -659,11 +716,16 @@ function ReaderToc:onShowToc()
 
     local items_per_page = G_reader_settings:readSetting("toc_items_per_page") or self.toc_items_per_page_default
     local items_font_size = G_reader_settings:readSetting("toc_items_font_size") or Menu.getItemFontSize(items_per_page)
+    local items_show_chapter_length = G_reader_settings:isTrue("toc_items_show_chapter_length")
     local items_with_dots = G_reader_settings:nilOrTrue("toc_items_with_dots")
 
     self:fillToc()
     -- build menu items
-    if #self.toc > 0 and not self.toc[1].text then
+    if #self.toc > 0 and not self.toc_menu_items_built then
+        self.toc_menu_items_built = true
+        if items_show_chapter_length then
+            self:completeTocWithChapterLengths()
+        end
         -- Have the width of 4 spaces be the unit of indentation
         local tmp = TextWidget:new{
             text = "    ",
@@ -677,6 +739,11 @@ function ReaderToc:onShowToc()
             v.index = k
             v.indent = toc_indent * (v.depth-1)
             v.text = self:cleanUpTocTitle(v.title, true)
+            if items_show_chapter_length then
+                v.post_text = T("(%1)", v.chapter_length)
+            else
+                v.post_text = nil
+            end
             v.bidi_wrap_func = BD.auto
             v.mandatory = v.page
             if has_hidden_flows then
@@ -716,7 +783,7 @@ function ReaderToc:onShowToc()
     end
 
     -- Estimate expand/collapse icon size
-    -- *2/5 to acount for Menu top title and bottom icons, and add some space between consecutive icons
+    -- *2/5 to account for Menu top title and bottom icons, and add some space between consecutive icons
     local icon_size = math.floor(Screen:getHeight() / items_per_page * 2/5)
     local button_width = icon_size * 2
     self.expand_button = Button:new{
@@ -764,7 +831,7 @@ function ReaderToc:onShowToc()
     --       This yields *slightly* better alignment between state & mandatory (in terms of effective margins).
     local button_size = self.expand_button:getSize()
     local toc_menu = Menu:new{
-        title = _("Table of Contents"),
+        title = self:getTitle(),
         item_table = self.collapsed_toc,
         state_w = can_collapse and button_size.w or 0,
         ui = self.ui,
@@ -946,7 +1013,7 @@ function ReaderToc:addToMainMenu(menu_items)
     -- insert table to main reader menu
     menu_items.table_of_contents = {
         text_func = function()
-            return self.ui.document:isTocAlternativeToc() and self.alt_toc_menu_title or self.toc_menu_title
+            return self:getTitle()
         end,
         callback = function()
             self:onShowToc()
@@ -959,13 +1026,22 @@ function ReaderToc:addToMainMenu(menu_items)
     -- Alternative ToC (only available with CRE documents)
     if self.ui.document:canHaveAlternativeToc() then
         menu_items.toc_alt_toc = {
-            text = _("Alternative table of contents"),
-            help_text = _([[
+            text = _("Alternative table of contents") .. " " .. self.alt_toc_symbol,
+            help_text_func = function()
+                local help_text = _([[
 An alternative table of contents can be built from document headings <H1> to <H6>.
 If the document contains no headings, or all are ignored, the alternative ToC will be built from document fragments and will point to the start of each individual HTML file in the EPUB.
 
 Some of the headings can be ignored, and hints can be set to other non-heading elements in a user style tweak, so they can be used as ToC items.
-See Style tweaks → Miscellaneous → Alternative ToC hints.]]),
+See Style tweaks → Miscellaneous → Alternative ToC hints.]])
+                if self.ui.handmade:isHandmadeTocEnabled() then
+                    help_text = _([[To use the alternative ToC, disable your custom table of contents first.]]) .. "\n\n" .. help_text
+                end
+                return help_text
+            end,
+            enabled_func = function()
+                return not self.ui.handmade:isHandmadeTocEnabled()
+            end,
             checked_func = function()
                 return self.ui.document:isTocAlternativeToc()
             end,
@@ -1136,8 +1212,19 @@ Enabling this option will restrict display to the chapter titles of progress bar
             UIManager:show(items_font)
         end,
     }
+    menu_items.toc_items_show_chapter_length = {
+        text = _("Show chapter length"),
+        keep_menu_open = true,
+        checked_func = function()
+            return not G_reader_settings:nilOrFalse("toc_items_show_chapter_length")
+        end,
+        callback = function()
+            G_reader_settings:flipNilOrFalse("toc_items_show_chapter_length")
+            self.toc_menu_items_built = false
+        end
+    }
     menu_items.toc_items_with_dots = {
-        text = _("With dots"),
+        text = _("Dot leaders"),
         keep_menu_open = true,
         checked_func = function()
             return G_reader_settings:nilOrTrue("toc_items_with_dots")

@@ -22,7 +22,7 @@ ko_update_check() {
     INSTALLED="${KOREADER_DIR}/ota/koreader.installed.tar"
     if [ -f "${NEWUPDATE}" ]; then
         # If button-listen service is running then stop it during update so that
-        # the update can overwite the binary
+        # the update can overwrite the binary
         systemctl is-active --quiet button-listen
         USING_BUTTON_LISTEN=$?
         if [ ${USING_BUTTON_LISTEN} -eq 0 ]; then
@@ -71,9 +71,6 @@ if [ -n "${fail}" ] && [ "${fail}" -eq 0 ]; then
     # By now, we know we're in the right directory, and our script name is pretty much set in stone, so we can forgo using $0
     exec ./koreader.sh "${@}"
 fi
-
-# export trained OCR data directory
-export TESSDATA_PREFIX="data"
 
 # export dict directory
 export STARDICT_DATA_DIR="data/dict"

@@ -3,7 +3,6 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local Cache = require("cache")
 local ConfirmBox = require("ui/widget/confirmbox")
 local DocumentRegistry = require("document/documentregistry")
-local Font = require("ui/font")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local Menu = require("ui/widget/menu")
@@ -280,6 +279,7 @@ function OPDSBrowser:fetchFeed(item_url, headers_only)
         text = text,
         icon = icon,
     })
+    logger.dbg(string.format("OPDS: Failed to fetch catalog `%s`: %s", item_url, text))
 end
 
 -- Parses feed to catalog
@@ -345,6 +345,7 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
         return url.absolute(item_url, href)
     end
 
+    local has_opensearch = false
     local hrefs = {}
     if feed.link then
         for __, link in ipairs(feed.link) do
@@ -354,13 +355,25 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
                         hrefs[link.rel] = build_href(link.href)
                     end
                 end
+                -- OpenSearch
                 if link.type:find(self.search_type) then
                     if link.href then
                         table.insert(item_table, { -- the first item in each subcatalog
                             text       = "\u{f002} " .. _("Search"), -- append SEARCH icon
                             url        = build_href(self:getSearchTemplate(build_href(link.href))),
                             searchable = true,
-                       })
+                        })
+                        has_opensearch = true
+                    end
+                end
+                -- Calibre search (also matches the actual template for OpenSearch!)
+                if link.type:find(self.search_template_type) and link.rel and link.rel:find("search") then
+                    if link.href and not has_opensearch then
+                        table.insert(item_table, {
+                            text       = "\u{f002} " .. _("Search"),
+                            url        = build_href(link.href:gsub("{searchTerms}", "%%s")),
+                            searchable = true,
+                        })
                     end
                 end
             end
@@ -486,7 +499,8 @@ function OPDSBrowser:updateCatalog(item_url, paths_updated)
             self:addSubCatalog(item_url)
         end
         if self.page_num <= 1 then
-            self:onNext()
+            -- Request more content, but don't change the page
+            self:onNextPage(true)
         end
     end
 end
@@ -496,7 +510,10 @@ function OPDSBrowser:appendCatalog(item_url)
     local menu_table = self:genItemTableFromURL(item_url)
     if #menu_table > 0 then
         for _, item in ipairs(menu_table) do
-            table.insert(self.item_table, item)
+            -- Don't append multiple search entries
+            if not item.searchable then
+                table.insert(self.item_table, item)
+            end
         end
         self.item_table.hrefs = menu_table.hrefs
         self:switchItemTable(self.catalog_title, self.item_table, -1)
@@ -688,7 +705,7 @@ function OPDSBrowser:showDownloads(item)
                     title = item.text,
                     title_multilines = true,
                     text = util.htmlToPlainTextIfHtml(item.content),
-                    text_face = Font:getFace("x_smallinfofont", G_reader_settings:readSetting("items_font_size")),
+                    text_type = "book_info",
                 })
             end,
         },
@@ -872,7 +889,7 @@ function OPDSBrowser:onHoldReturn()
 end
 
 -- Menu action on next-page chevron tap (request and show more catalog entries)
-function OPDSBrowser:onNext()
+function OPDSBrowser:onNextPage(fill_only)
     -- self.page_num comes from menu.lua
     local page_num = self.page_num
     -- fetch more entries until we fill out one page or reach the end
@@ -885,6 +902,10 @@ function OPDSBrowser:onNext()
         else
             break
         end
+    end
+    if not fill_only then
+        -- We also *do* want to paginate, so call the base class.
+        Menu.onNextPage(self)
     end
     return true
 end

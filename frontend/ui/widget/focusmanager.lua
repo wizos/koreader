@@ -53,11 +53,12 @@ local function populateEventMappings()
         local FEW_KEYS_END_INDEX = #event_keys -- Few keys device: only setup up, down, right and press
 
         table.insert(event_keys, { "FocusLeft",  { { "Left" },  event = "FocusMove", args = {-1, 0} } })
-        local NORMAL_KEYS_END_INDEX = #event_keys
 
-        -- Advanced Feature: following event handlers can be enabled via settings.reader.lua
-        -- Key combinations (Sym+AA, Alt+Up, Tab, Shift+Tab and so on) are not used but shown as examples here
-        table.insert(event_keys, { "Hold",           { { "Sym", "AA" },    event = "Hold" } })
+        -- Advanced features: more event handlers can be enabled via settings.reader.lua in a similar manner
+        table.insert(event_keys, { "HoldContext",    { { "ContextMenu" },  event = "Hold" } })
+        table.insert(event_keys, { "HoldShift",      { { "Shift", "Press" }, event = "Hold" } })
+        table.insert(event_keys, { "HoldScreenKB",   { { "ScreenKB", "Press" }, event = "Hold" } })
+        table.insert(event_keys, { "HoldSymAA",      { { "Sym", "AA" },    event = "Hold" } })
         -- half rows/columns move, it is helpful for slow device like Kindle DX to move quickly
         table.insert(event_keys, { "HalfFocusUp",    { { "Alt", "Up" },    event = "FocusHalfMove", args = {"up"} } })
         table.insert(event_keys, { "HalfFocusRight", { { "Alt", "Right" }, event = "FocusHalfMove", args = {"right"} } })
@@ -66,6 +67,7 @@ local function populateEventMappings()
         -- for PC navigation behavior support
         table.insert(event_keys, { "FocusNext",      { { "Tab" },          event = "FocusNext" } })
         table.insert(event_keys, { "FocusPrevious",  { { "Shift", "Tab" }, event = "FocusPrevious" } })
+        local NORMAL_KEYS_END_INDEX = #event_keys
 
         for i = 1, FEW_KEYS_END_INDEX do
             local key_name = event_keys[i][1]
@@ -206,7 +208,7 @@ function FocusManager:onFocusPrevious()
 end
 
 function FocusManager:onFocusMove(args)
-    if not self.layout then -- allow parent focus manger to handle the event
+    if not self.layout then -- allow parent focus manager to handle the event
         return false
     end
     local dx, dy = unpack(args)
@@ -291,10 +293,14 @@ function FocusManager:onPhysicalKeyboardDisconnected()
 end
 
 -- constant, used to reset focus widget after layout recreation
--- not send Unfocus event
+-- do not send an Unfocus event
 FocusManager.NOT_UNFOCUS = 1
--- not need to send Focus event
+-- do not send a Focus event
 FocusManager.NOT_FOCUS = 2
+-- In some cases, we may only want to send Focus events on non-Touch devices
+FocusManager.FOCUS_ONLY_ON_NT = (Device:hasDPad() and not Device:isTouchDevice()) and 0 or FocusManager.NOT_FOCUS
+-- And in some cases, we may want to send both events *regardless* of heuristics or device caps
+FocusManager.FORCED_FOCUS = 4
 
 --- Move focus to specified widget
 function FocusManager:moveFocusTo(x, y, focus_flags)
@@ -315,11 +321,27 @@ function FocusManager:moveFocusTo(x, y, focus_flags)
         self.selected.x = x
         self.selected.y = y
         -- widget create new layout on update, previous may be removed from new layout.
-        if Device:hasDPad() then
-            if not bit.band(focus_flags, FocusManager.NOT_UNFOCUS) and current_item and current_item ~= target_item then
-                current_item:handleEvent(Event:new("Unfocus"))
+        if bit.band(focus_flags, FocusManager.FORCED_FOCUS) == FocusManager.FORCED_FOCUS or Device:hasDPad() then
+            -- If FORCED_FOCUS was requested, we want *all* the events: mask out both NOT_ bits
+            if bit.band(focus_flags, FocusManager.FORCED_FOCUS) == FocusManager.FORCED_FOCUS then
+                focus_flags = bit.band(focus_flags, bit.bnot(bit.bor(FocusManager.NOT_UNFOCUS, FocusManager.NOT_FOCUS)))
             end
-            if not bit.band(focus_flags, FocusManager.NOT_FOCUS) then
+            if bit.band(focus_flags, FocusManager.NOT_UNFOCUS) ~= FocusManager.NOT_UNFOCUS then
+                -- NOTE: We can't necessarily guarantee the integrity of self.layout,
+                --       as some callers *will* mangle it and call us expecting to fix things ;).
+                --       Since we do not want to leave *multiple* items (visually) focused,
+                --       we potentially need to be a bit heavy-handed ;).
+                if current_item and current_item ~= target_item then
+                    -- This is the absolute best-case scenario, when self.layout's integrity is sound
+                    current_item:handleEvent(Event:new("Unfocus"))
+                else
+                    -- Couldn't find the current item, or it matches the target_item: blast the whole widget container,
+                    -- just in case we still have a different, older widget visually focused.
+                    -- Can easily happen if caller calls refocusWidget *after* having manually mangled self.layout.
+                    self:handleEvent(Event:new("Unfocus"))
+                end
+            end
+            if bit.band(focus_flags, FocusManager.NOT_FOCUS) ~= FocusManager.NOT_FOCUS then
                 target_item:handleEvent(Event:new("Focus"))
                 UIManager:setDirty(self.show_parent or self, "fast")
             end
@@ -369,7 +391,7 @@ end
 
 function FocusManager:_verticalStep(dy)
     local x = self.selected.x
-    if type(self.layout[self.selected.y + dy]) ~= "table" or self.layout[self.selected.y + dy] == {} then
+    if type(self.layout[self.selected.y + dy]) ~= "table" or next(self.layout[self.selected.y + dy]) == nil then
         logger.err("[FocusManager] : Malformed layout")
         return false
     end
@@ -466,24 +488,32 @@ function FocusManager:disableFocusManagement(parent)
 end
 
 -- constant for refocusWidget method to ease code reading
+FocusManager.RENDER_NOW = false
 FocusManager.RENDER_IN_NEXT_TICK = true
 
 --- Container calls this method to re-set focus widget style
 --- Some container regenerate layout on update and lose focus style
-function FocusManager:refocusWidget(nextTick)
+function FocusManager:refocusWidget(nextTick, focus_flags)
+    -- On touch devices, we do *not* want to show visual focus changes generated programmatically,
+    -- we only want to see them for actual user input events (#12361).
+    if not focus_flags then
+        focus_flags = FocusManager.FOCUS_ONLY_ON_NT
+    end
+
     if not self._parent then
         if not nextTick then
-            self:moveFocusTo(self.selected.x, self.selected.y)
+            self:moveFocusTo(self.selected.x, self.selected.y, focus_flags)
         else
             -- sometimes refocusWidget called in widget's action callback
             -- widget may force repaint after callback, like Button with vsync = true
             -- then focus style will be lost, set focus style to next tick to make sure focus style painted
             UIManager:nextTick(function()
-                self:moveFocusTo(self.selected.x, self.selected.y)
+                self:moveFocusTo(self.selected.x, self.selected.y, focus_flags)
             end)
         end
     else
-        self._parent:refocusWidget(nextTick)
+        self._parent:refocusWidget(nextTick, focus_flags)
+        self._parent = nil
     end
 end
 
