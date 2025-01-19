@@ -1,11 +1,14 @@
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
+local util = require("util")
 local _ = require("gettext")
 
 local DEFAULT_PLUGIN_PATH = "plugins"
 
 -- plugin names that were removed and are no longer available.
 local OBSOLETE_PLUGINS = {
+    autofrontlight = true,
+    backgroundrunner = true,
     calibrecompanion = true,
     evernote = true,
     goodreads = true,
@@ -14,14 +17,54 @@ local OBSOLETE_PLUGINS = {
     storagestat = true,
     zsync = true,
 }
+
+local DEPRECATION_MESSAGES = {
+    remove = _("This plugin is unmaintained and will be removed soon."),
+    feature = _("The following features are unmaintained and will be removed soon:"),
+}
+
+local function isProvider(name)
+    return name:sub(1, 8) == "provider"
+end
+
+local function sortProvidersFirst(v1, v2)
+    if isProvider(v1.name) and isProvider(v2.name) then
+        return v1.path < v2.path
+    elseif isProvider(v1.name) then
+        return true
+    elseif isProvider(v2.name) then
+        return false
+    else
+        return v1.path < v2.path
+    end
+end
+
+local function deprecationFmt(field)
+    local s
+    if type(field) == "table" then
+        local f1, f2 = DEPRECATION_MESSAGES[field[1]], field[2]
+        if not f2 then
+            s = string.format("%s", f1)
+        else
+            s = string.format("%s: %s", f1, f2)
+        end
+    end
+    if not s then
+        return nil, ""
+    end
+    return true, s
+end
+
 -- Deprecated plugins are still available, but show a hint about deprecation.
 local function getMenuTable(plugin)
     local t = {}
     t.name = plugin.name
     t.fullname = string.format("%s%s", plugin.fullname or plugin.name,
         plugin.deprecated and " (" .. _("outdated") .. ")" or "")
+
+    local deprecated, message = deprecationFmt(plugin.deprecated)
     t.description = string.format("%s%s", plugin.description,
-        type(plugin.deprecated) == "string"  and "\n\n" .. plugin.deprecated or "")
+        deprecated and "\n\n" .. message or "")
     return t
 end
 
@@ -50,12 +93,17 @@ local PluginLoader = {
     all_plugins = nil,
 }
 
-function PluginLoader:loadPlugins()
-    if self.enabled_plugins then return self.enabled_plugins, self.disabled_plugins end
+function PluginLoader:_discover()
+    local plugins_disabled = G_reader_settings:readSetting("plugins_disabled")
+    if type(plugins_disabled) ~= "table" then
+        plugins_disabled = {}
+    end
+    -- disable obsolete plugins
+    for element in pairs(OBSOLETE_PLUGINS) do
+        plugins_disabled[element] = true
+    end
 
-    self.enabled_plugins = {}
-    self.disabled_plugins = {}
-    self.loaded_plugins = {}
+    local discovered = {}
     local lookup_path_list = { DEFAULT_PLUGIN_PATH }
     local extra_paths = G_reader_settings:readSetting("extra_plugin_paths")
     if extra_paths then
@@ -80,21 +128,8 @@ function PluginLoader:loadPlugins()
             table.insert(lookup_path_list, extra_path)
         end
     end
-
-    -- keep reference to old value so they can be restored later
-    local package_path = package.path
-    local package_cpath = package.cpath
-
-    local plugins_disabled = G_reader_settings:readSetting("plugins_disabled")
-    if type(plugins_disabled) ~= "table" then
-        plugins_disabled = {}
-    end
-    -- disable obsolete plugins
-    for element in pairs(OBSOLETE_PLUGINS) do
-        plugins_disabled[element] = true
-    end
     for _, lookup_path in ipairs(lookup_path_list) do
-        logger.info("Loading plugins from directory:", lookup_path)
+        logger.info("Looking for plugins in directory:", lookup_path)
         for entry in lfs.dir(lookup_path) do
             local plugin_root = lookup_path.."/"..entry
             local mode = lfs.attributes(plugin_root, "mode")
@@ -102,36 +137,76 @@ function PluginLoader:loadPlugins()
             if mode == "directory" and entry:find(".+%.koplugin$") then
                 local mainfile = plugin_root.."/main.lua"
                 local metafile = plugin_root.."/_meta.lua"
+                local disabled = false
                 if plugins_disabled and plugins_disabled[entry:sub(1, -10)] then
                     mainfile = metafile
+                    disabled = true
                 end
-                package.path = string.format("%s/?.lua;%s", plugin_root, package_path)
-                package.cpath = string.format("%s/lib/?.so;%s", plugin_root, package_cpath)
-                local ok, plugin_module = pcall(dofile, mainfile)
-                if not ok or not plugin_module then
-                    logger.warn("Error when loading", mainfile, plugin_module)
-                elseif type(plugin_module.disabled) ~= "boolean" or not plugin_module.disabled then
-                    plugin_module.path = plugin_root
-                    plugin_module.name = plugin_module.name or plugin_root:match("/(.-)%.koplugin")
-                    if (plugins_disabled and plugins_disabled[entry:sub(1, -10)]) then
-                        table.insert(self.disabled_plugins, plugin_module)
-                    else
-                        local ok_meta, plugin_metamodule = pcall(dofile, metafile)
-                        if ok_meta and plugin_metamodule then
-                            for k,v in pairs(plugin_metamodule) do plugin_module[k] = v end
-                        end
-                        sandboxPluginEventHandlers(plugin_module)
-                        table.insert(self.enabled_plugins, plugin_module)
-                    end
-                else
-                    logger.dbg("Plugin", mainfile, "has been disabled.")
-                end
-                package.path = package_path
-                package.cpath = package_cpath
+                local __, name = util.splitFilePathName(plugin_root)
+
+                table.insert(discovered, {
+                    ["main"] = mainfile,
+                    ["meta"] = metafile,
+                    ["path"] = plugin_root,
+                    ["disabled"] = disabled,
+                    ["name"] = name,
+                })
             end
         end
     end
+    return discovered
+end
 
+function PluginLoader:_load(t)
+    -- keep reference to old value so they can be restored later
+    local package_path = package.path
+    local package_cpath = package.cpath
+
+    local mainfile, metafile, plugin_root, disabled
+    for _, v in ipairs(t) do
+        mainfile = v.main
+        metafile = v.meta
+        plugin_root = v.path
+        disabled = v.disabled
+        package.path = string.format("%s/?.lua;%s", plugin_root, package_path)
+        package.cpath = string.format("%s/lib/?.so;%s", plugin_root, package_cpath)
+        local ok, plugin_module = pcall(dofile, mainfile)
+        if not ok or not plugin_module then
+            logger.warn("Error when loading", mainfile, plugin_module)
+        elseif type(plugin_module.disabled) ~= "boolean" or not plugin_module.disabled then
+            plugin_module.path = plugin_root
+            plugin_module.name = plugin_module.name or plugin_root:match("/(.-)%.koplugin")
+            if disabled then
+                table.insert(self.disabled_plugins, plugin_module)
+            else
+                local ok_meta, plugin_metamodule = pcall(dofile, metafile)
+                if ok_meta and plugin_metamodule then
+                    for k, module in pairs(plugin_metamodule) do
+                        plugin_module[k] = module
+                    end
+                end
+                sandboxPluginEventHandlers(plugin_module)
+                table.insert(self.enabled_plugins, plugin_module)
+                logger.dbg("Plugin loaded", plugin_module.name)
+            end
+        end
+    end
+    package.path = package_path
+    package.cpath = package_cpath
+
+end
+
+
+function PluginLoader:loadPlugins()
+    if self.enabled_plugins then return self.enabled_plugins, self.disabled_plugins end
+
+    self.enabled_plugins = {}
+    self.disabled_plugins = {}
+    self.loaded_plugins = {}
+
+    local t = self:_discover()
+    table.sort(t, sortProvidersFirst)
+    self:_load(t)
     -- set package path for all loaded plugins
     for _, plugin in ipairs(self.enabled_plugins) do
         package.path = string.format("%s;%s/?.lua", package.path, plugin.path)

@@ -1,7 +1,6 @@
-local BD = require("ui/bidi")
-local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
 local ConfirmBox = require("ui/widget/confirmbox")
 local DataStorage = require("datastorage")
+local Device = require("device")
 local DictQuickLookup = require("ui/widget/dictquicklookup")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
@@ -13,6 +12,7 @@ local Trapper = require("ui/trapper")
 local Translator = require("ui/translator")
 local UIManager = require("ui/uimanager")
 local Wikipedia = require("ui/wikipedia")
+local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util  = require("util")
@@ -29,10 +29,20 @@ local ReaderWikipedia = ReaderDictionary:extend{
 }
 
 function ReaderWikipedia:init()
+    self:registerKeyEvents()
     self.wiki_languages = {}
     self.ui.menu:registerToMainMenu(self)
     if not wikipedia_history then
         wikipedia_history = LuaData:open(DataStorage:getSettingsDir() .. "/wikipedia_history.lua", "WikipediaHistory")
+    end
+end
+
+function ReaderWikipedia:registerKeyEvents()
+    if Device:hasKeyboard() then
+        self.key_events.ShowWikipediaLookup = { { "Alt", "W" }, { "Ctrl", "W" } }
+        if Device.k3_alt_plus_key_kernel_translated then
+            self.key_events.ShowWikipediaLookup = { { Device.k3_alt_plus_key_kernel_translated["W"] } }
+        end
     end
 end
 
@@ -114,6 +124,17 @@ function ReaderWikipedia:addToMainMenu(menu_items)
             })
         end,
     }
+    local function genChoiceMenuEntry(title, setting, value, default)
+        return {
+            text = title,
+            checked_func = function()
+                return G_reader_settings:readSetting(setting, default) == value
+            end,
+            callback = function()
+                G_reader_settings:saveSetting(setting, value)
+            end,
+        }
+    end
     menu_items.wikipedia_settings = {
         text = _("Wikipedia settings"),
         sub_item_table = {
@@ -171,113 +192,26 @@ function ReaderWikipedia:addToMainMenu(menu_items)
                     UIManager:show(wikilang_input)
                     wikilang_input:onShowKeyboard()
                 end,
+                separator = true,
             },
             { -- setting used by dictquicklookup
                 text = _("Set Wikipedia 'Save as EPUB' folder"),
                 keep_menu_open = true,
-                callback = function()
-                    local choose_directory = function()
-                        -- Default directory as chosen by DictQuickLookup
-                        local default_dir = G_reader_settings:readSetting("wikipedia_save_dir")
-                                         or G_reader_settings:readSetting("home_dir")
-                                         or require("apps/filemanager/filemanagerutil").getDefaultDir()
-                        local dialog
-                        dialog = ButtonDialogTitle:new{
-                            title = T(_("Current Wikipedia 'Save as EPUB' folder:\n\n%1\n"), BD.dirpath(default_dir)),
-                            buttons = {
-                                {
-                                    {
-                                        text = _("Keep this folder"),
-                                        callback = function()
-                                            UIManager:close(dialog)
-                                        end,
-                                    },
-                                },
-                                {
-                                    {
-                                    text = _("Choose other folder"),
-                                    callback = function()
-                                        UIManager:close(dialog)
-                                        -- Use currently read book's directory as starting point,
-                                        -- so a user reading a wikipedia article can quickly select
-                                        -- it to save related new articles in the same directory
-                                        local dir = G_reader_settings:readSetting("wikipedia_save_dir")
-                                                 or G_reader_settings:readSetting("home_dir")
-                                                 or require("apps/filemanager/filemanagerutil").getDefaultDir()
-                                                 or "/"
-                                        -- If this directory has no subdirectory, we would be displaying
-                                        -- a single "..", so use parent directory in that case.
-                                        local has_subdirectory = false
-                                        for f in lfs.dir(dir) do
-                                            local attributes = lfs.attributes(dir.."/"..f)
-                                            if attributes and attributes.mode == "directory" then
-                                                if f ~= "." and f ~= ".." and f:sub(-4) ~= ".sdr"then
-                                                    has_subdirectory = true
-                                                    break
-                                                end
-                                            end
-                                        end
-                                        if not has_subdirectory then
-                                            dir = dir:match("(.*)/")
-                                        end
-                                        local PathChooser = require("ui/widget/pathchooser")
-                                        local path_chooser = PathChooser:new{
-                                            select_directory = true,
-                                            select_file = false,
-                                            path = dir,
-                                            onConfirm = function(path)
-                                                G_reader_settings:saveSetting("wikipedia_save_dir", path)
-                                                UIManager:show(InfoMessage:new{
-                                                    text = T(_("Wikipedia 'Save as EPUB' folder set to:\n%1"), BD.dirpath(path)),
-                                                })
-                                            end
-                                        }
-                                        UIManager:show(path_chooser)
-                                    end,
-                                    },
-                                },
-                            },
-                        }
-                        UIManager:show(dialog)
-                    end
-                    -- If wikipedia_save_dir has not yet been set, propose to use
-                    -- home_dir/Wikipedia/
-                    if not G_reader_settings:readSetting("wikipedia_save_dir") then
-                        local home_dir = G_reader_settings:readSetting("home_dir")
-                        if not home_dir or lfs.attributes(home_dir, "mode") ~= "directory" then
-                            home_dir = require("apps/filemanager/filemanagerutil").getDefaultDir()
-                        end
-                        home_dir = home_dir:gsub("^(.-)/*$", "%1") -- remove trailing slash
-                        if home_dir and lfs.attributes(home_dir, "mode") == "directory" then
-                            local wikipedia_dir = home_dir.."/Wikipedia"
-                            local text = _([[
+                help_text = _([[
 Wikipedia articles can be saved as an EPUB for more comfortable reading.
 
-You can choose an existing folder, or use a default folder named "Wikipedia" in your reader's home folder.
-
-Where do you want them saved?]])
-                            UIManager:show(ConfirmBox:new{
-                                text = text,
-                                ok_text = _("Use ~/Wikipedia/"),
-                                ok_callback = function()
-                                    if not util.pathExists(wikipedia_dir) then
-                                        lfs.mkdir(wikipedia_dir)
-                                    end
-                                    G_reader_settings:saveSetting("wikipedia_save_dir", wikipedia_dir)
-                                    UIManager:show(InfoMessage:new{
-                                        text = T(_("Wikipedia 'Save as EPUB' folder set to:\n%1"), BD.dirpath(wikipedia_dir)),
-                                    })
-                                end,
-                                cancel_text = _("Choose folder"),
-                                cancel_callback = function()
-                                    choose_directory()
-                                end,
-                            })
-                            return
+You can choose an existing folder, or use a default folder named "Wikipedia" in your reader's home folder.]]),
+                callback = function()
+                    local title_header = _("Current Wikipedia 'Save as EPUB' folder:")
+                    local current_path = G_reader_settings:readSetting("wikipedia_save_dir")
+                    local default_path = DictQuickLookup.getWikiSaveEpubDefaultDir()
+                    local caller_callback = function(path)
+                        G_reader_settings:saveSetting("wikipedia_save_dir", path)
+                        if not util.pathExists(path) then
+                            lfs.mkdir(path)
                         end
                     end
-                    -- If setting exists, or no home_dir found, let user choose directory
-                    choose_directory()
+                    filemanagerutil.showChooseDialog(title_header, caller_callback, current_path, default_path)
                 end,
             },
             { -- setting used by dictquicklookup
@@ -288,6 +222,41 @@ Where do you want them saved?]])
                 callback = function()
                     G_reader_settings:flipNilOrFalse("wikipedia_save_in_book_dir")
                 end,
+            },
+            { -- setting used in wikipedia.lua
+                text_func = function()
+                    local include_images = _("ask")
+                    if G_reader_settings:readSetting("wikipedia_epub_include_images") == true then
+                        include_images = _("always")
+                    elseif G_reader_settings:readSetting("wikipedia_epub_include_images") == false then
+                        include_images = _("never")
+                    end
+                    return T(_("Include images in EPUB: %1"), include_images)
+                end,
+                sub_item_table = {
+                    genChoiceMenuEntry(_("Ask"), "wikipedia_epub_include_images", nil),
+                    genChoiceMenuEntry(_("Include images"), "wikipedia_epub_include_images", true),
+                    genChoiceMenuEntry(_("Don't include images"), "wikipedia_epub_include_images", false),
+                },
+            },
+            { -- setting used in wikipedia.lua
+                text_func = function()
+                    local images_quality = _("ask")
+                    if G_reader_settings:readSetting("wikipedia_epub_highres_images") == true then
+                        images_quality = _("higher")
+                    elseif G_reader_settings:readSetting("wikipedia_epub_highres_images") == false then
+                        images_quality = _("standard")
+                    end
+                    return T(_("Images quality in EPUB: %1"), images_quality)
+                end,
+                enabled_func = function()
+                    return G_reader_settings:readSetting("wikipedia_epub_include_images") ~= false
+                end,
+                sub_item_table = {
+                    genChoiceMenuEntry(_("Ask"), "wikipedia_epub_highres_images", nil),
+                    genChoiceMenuEntry(_("Standard quality"), "wikipedia_epub_highres_images", false),
+                    genChoiceMenuEntry(_("Higher quality"), "wikipedia_epub_highres_images", true),
+                },
                 separator = true,
             },
             {
@@ -387,16 +356,16 @@ function ReaderWikipedia:initLanguages(word)
     end
 end
 
-function ReaderWikipedia:onLookupWikipedia(word, is_sane, box, get_fullpage, forced_lang)
+function ReaderWikipedia:onLookupWikipedia(word, is_sane, box, get_fullpage, forced_lang, dict_close_callback)
     -- Wrapped through Trapper, as we may be using Trapper:dismissableRunInSubprocess() in it
     Trapper:wrap(function()
-        self:lookupWikipedia(word, is_sane, box, get_fullpage, forced_lang)
+        self:lookupWikipedia(word, is_sane, box, get_fullpage, forced_lang, dict_close_callback)
     end)
     return true
 end
 
-function ReaderWikipedia:lookupWikipedia(word, is_sane, box, get_fullpage, forced_lang)
-    if NetworkMgr:willRerunWhenOnline(function() self:lookupWikipedia(word, is_sane, box, get_fullpage, forced_lang) end) then
+function ReaderWikipedia:lookupWikipedia(word, is_sane, box, get_fullpage, forced_lang, dict_close_callback)
+    if NetworkMgr:willRerunWhenOnline(function() self:lookupWikipedia(word, is_sane, box, get_fullpage, forced_lang, dict_close_callback) end) then
         -- Not online yet, nothing more to do here, NetworkMgr will forward the callback and run it once connected!
         return
     end
@@ -528,7 +497,7 @@ function ReaderWikipedia:lookupWikipedia(word, is_sane, box, get_fullpage, force
         results.no_result = true
         logger.dbg("dummy result table:", word, results)
     end
-    self:showDict(word, results, box)
+    self:showDict(word, results, box, nil, dict_close_callback)
 end
 
 function ReaderWikipedia:getWikiLanguages(first_lang)

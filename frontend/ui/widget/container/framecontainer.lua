@@ -43,6 +43,11 @@ local FrameContainer = WidgetContainer:extend{
     focusable = false,
     focus_border_size = Size.border.window * 2,
     focus_border_color = Blitbuffer.COLOR_BLACK,
+    -- paint hatched background if provided
+    stripe_color = nil,
+    stripe_width = nil,
+    stripe_over = nil, -- draw stripes *after* content is drawn
+    stripe_over_alpha = 1,
 }
 
 function FrameContainer:getSize()
@@ -88,11 +93,15 @@ end
 
 function FrameContainer:paintTo(bb, x, y)
     local my_size = self:getSize()
-    self.dimen = Geom:new{
-        x = x, y = y,
-        w = my_size.w,
-        h = my_size.h
-    }
+    if not self.dimen then
+        self.dimen = Geom:new{
+            x = x, y = y,
+            w = my_size.w, h = my_size.h,
+        }
+    else
+        self.dimen.x = x
+        self.dimen.y = y
+    end
     local container_width = self.width or my_size.w
     local container_height = self.height or my_size.h
 
@@ -101,11 +110,22 @@ function FrameContainer:paintTo(bb, x, y)
         shift_x = container_width - my_size.w
     end
 
-    --- @todo get rid of margin here?  13.03 2013 (houqp)
     if self.background then
-        bb:paintRoundedRect(x, y,
-                            container_width, container_height,
-                            self.background, self.radius)
+        if not self.radius or not self.bordersize then
+            bb:paintRoundedRect(x, y,
+                                container_width, container_height,
+                                self.background, self.radius)
+        else
+            bb:paintRoundedRect(x, y,
+                                container_width, container_height,
+                                self.background, self.radius + self.bordersize)
+        end
+    end
+    if self.stripe_width and self.stripe_color and not self.stripe_over then
+        -- (No support for radius when hatched/stripe)
+        bb:hatchRect(x, y,
+                        container_width, container_height,
+                        self.stripe_width, self.stripe_color)
     end
     if self.inner_bordersize > 0 then
         --- @warning This doesn't actually support radius, it'll always be a square.
@@ -115,15 +135,24 @@ function FrameContainer:paintTo(bb, x, y)
             self.inner_bordersize, self.color, self.radius)
     end
     if self.bordersize > 0 then
+        local anti_alias = G_reader_settings:nilOrTrue("anti_alias_ui")
         bb:paintBorder(x + self.margin, y + self.margin,
             container_width - self.margin * 2,
             container_height - self.margin * 2,
-            self.bordersize, self.color, self.radius)
+            self.bordersize, self.color, self.radius, anti_alias)
     end
     if self[1] then
         self[1]:paintTo(bb,
             x + self.margin + self.bordersize + self._padding_left + shift_x,
             y + self.margin + self.bordersize + self._padding_top)
+    end
+    if self.stripe_width and self.stripe_color and self.stripe_over then
+        -- (No support for radius when hatched/stripe)
+        -- We don't want to draw the stripes over any border
+        local pad = self.margin + math.max(self.bordersize, self.inner_bordersize)
+        bb:hatchRect(x + pad, y + pad,
+                        container_width - pad * 2, container_height - pad * 2,
+                        self.stripe_width, self.stripe_color, self.stripe_over_alpha)
     end
     if self.invert then
         bb:invertRect(x + self.bordersize, y + self.bordersize,
@@ -131,7 +160,7 @@ function FrameContainer:paintTo(bb, x, y)
             container_height - 2*self.bordersize)
     end
     if self.dim then
-        bb:dimRect(x + self.bordersize, y + self.bordersize,
+        bb:lightenRect(x + self.bordersize, y + self.bordersize,
             container_width - 2*self.bordersize,
             container_height - 2*self.bordersize)
     end

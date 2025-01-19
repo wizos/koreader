@@ -51,79 +51,33 @@ end
 function ReaderPaging:onGesture() end
 
 function ReaderPaging:registerKeyEvents()
-    if Device:hasKeys() then
-        self.key_events.GotoNextPage = {
-            { { "RPgFwd", "LPgFwd", not Device:hasFewKeys() and "Right" } },
-            event = "GotoViewRel",
-            args = 1,
-        }
-        self.key_events.GotoPrevPage = {
-            { { "RPgBack", "LPgBack", not Device:hasFewKeys() and "Left" } },
-            event = "GotoViewRel",
-            args = -1,
-        }
-        self.key_events.GotoNextPos = {
-            { "Down" },
-            event = "GotoPosRel",
-            args = 1,
-        }
-        self.key_events.GotoPrevPos = {
-            { "Up" },
-            event = "GotoPosRel",
-            args = -1,
-        }
+    if Device:hasDPad() and Device:useDPadAsActionKeys() then
+        if G_reader_settings:isTrue("left_right_keys_turn_pages") then
+            self.key_events.GotoNextPage = { { { "RPgFwd", "LPgFwd", "Right", " " } }, event = "GotoViewRel", args = 1, }
+            self.key_events.GotoPrevPage = { { { "RPgBack", "LPgBack", "Left" } }, event = "GotoViewRel", args = -1, }
+        elseif G_reader_settings:nilOrFalse("left_right_keys_turn_pages") then
+            self.key_events.GotoNextChapter = { { "Right" }, event = "GotoNextChapter", args = 1, }
+            self.key_events.GotoPrevChapter = { { "Left" }, event = "GotoPrevChapter", args = -1, }
+            self.key_events.GotoNextPage = { { { "RPgFwd", "LPgFwd", " " } }, event = "GotoViewRel", args = 1, }
+            self.key_events.GotoPrevPage = { { { "RPgBack", "LPgBack" } }, event = "GotoViewRel", args = -1, }
+        end
+    elseif Device:hasKeys() then
+        self.key_events.GotoNextPage = { { { "RPgFwd", "LPgFwd", not Device:hasFewKeys() and "Right" } }, event = "GotoViewRel", args = 1, }
+        self.key_events.GotoPrevPage = { { { "RPgBack", "LPgBack", not Device:hasFewKeys() and "Left" } }, event = "GotoViewRel", args = -1, }
+        self.key_events.GotoNextPos = { { "Down" }, event = "GotoPosRel", args = 1, }
+        self.key_events.GotoPrevPos = { { "Up" }, event = "GotoPosRel", args = -1, }
     end
-    if Device:hasKeyboard() then
-        self.key_events.GotoFirst = {
-            { "1" },
-            event = "GotoPercent",
-            args = 0,
-        }
-        self.key_events.Goto11 = {
-            { "2" },
-            event = "GotoPercent",
-            args = 11,
-        }
-        self.key_events.Goto22 = {
-            { "3" },
-            event = "GotoPercent",
-            args = 22,
-        }
-        self.key_events.Goto33 = {
-            { "4" },
-            event = "GotoPercent",
-            args = 33,
-        }
-        self.key_events.Goto44 = {
-            { "5" },
-            event = "GotoPercent",
-            args = 44,
-        }
-        self.key_events.Goto55 = {
-            { "6" },
-            event = "GotoPercent",
-            args = 55,
-        }
-        self.key_events.Goto66 = {
-            { "7" },
-            event = "GotoPercent",
-            args = 66,
-        }
-        self.key_events.Goto77 = {
-            { "8" },
-            event = "GotoPercent",
-            args = 77,
-        }
-        self.key_events.Goto88 = {
-            { "9" },
-            event = "GotoPercent",
-            args = 88,
-        }
-        self.key_events.GotoLast = {
-            { "0" },
-            event = "GotoPercent",
-            args = 100,
-        }
+    if Device:hasKeyboard() and not Device.k3_alt_plus_key_kernel_translated then
+        self.key_events.GotoFirst = { { "1" }, event = "GotoPercent", args = 0,   }
+        self.key_events.Goto11    = { { "2" }, event = "GotoPercent", args = 11,  }
+        self.key_events.Goto22    = { { "3" }, event = "GotoPercent", args = 22,  }
+        self.key_events.Goto33    = { { "4" }, event = "GotoPercent", args = 33,  }
+        self.key_events.Goto44    = { { "5" }, event = "GotoPercent", args = 44,  }
+        self.key_events.Goto55    = { { "6" }, event = "GotoPercent", args = 55,  }
+        self.key_events.Goto66    = { { "7" }, event = "GotoPercent", args = 66,  }
+        self.key_events.Goto77    = { { "8" }, event = "GotoPercent", args = 77,  }
+        self.key_events.Goto88    = { { "9" }, event = "GotoPercent", args = 88,  }
+        self.key_events.Goto99    = { { "0" }, event = "GotoPercent", args = 100, }
     end
 end
 
@@ -336,6 +290,37 @@ function ReaderPaging:bookmarkFlipping(flipping_page, flipping_ges)
         self.ui:handleEvent(Event:new("GotoNextBookmark", flipping_page))
     end
     UIManager:setDirty(self.view.dialog, "partial")
+end
+
+function ReaderPaging:enterSkimMode()
+    if self.view.document.configurable.text_wrap ~= 0 or self.view.page_scroll or self.view.zoom_mode ~= "page" then
+        self.skim_backup = {
+            text_wrap    = self.view.document.configurable.text_wrap,
+            page_scroll  = self.view.page_scroll,
+            zoom_mode    = self.view.zoom_mode,
+            current_page = self.current_page,
+            location     = self:getBookLocation(),
+        }
+        self.view.document.configurable.text_wrap = 0
+        self.view.page_scroll = false
+        self.ui.zooming:onSetZoomMode("page")
+        self.ui.zooming:onReZoom()
+    end
+end
+
+function ReaderPaging:exitSkimMode()
+    if self.skim_backup then
+        self.view.document.configurable.text_wrap = self.skim_backup.text_wrap
+        self.view.page_scroll = self.skim_backup.page_scroll
+        self.ui.zooming:onSetZoomMode(self.skim_backup.zoom_mode)
+        self.ui.zooming:onReZoom()
+        if self.current_page == self.skim_backup.current_page then
+            -- if SkimToWidget is closed on the start page, restore exact location
+            self.current_page = 0 -- do not emit extra PageUpdate event
+            self:onRestoreBookLocation(self.skim_backup.location)
+        end
+        self.skim_backup = nil
+    end
 end
 
 function ReaderPaging:onScrollSettingsUpdated(scroll_method, inertial_scroll_enabled, scroll_activation_delay_ms)
@@ -673,11 +658,11 @@ function ReaderPaging:onInitScrollPageStates(orig_mode)
     if self.view.page_scroll and self.view.state.page then
         self.orig_page = self.current_page
         self.view.page_states = {}
-        local blank_area = Geom:new{}
+        local blank_area = Geom:new()
         blank_area:setSizeTo(self.view.visible_area)
         while blank_area.h > 0 do
-            local offset = Geom:new{}
-            -- caculate position in current page
+            local offset = Geom:new()
+            -- calculate position in current page
             if self.current_page == self.orig_page then
                 local page_area = self.view:getPageArea(
                     self.view.state.page,
@@ -691,7 +676,9 @@ function ReaderPaging:onInitScrollPageStates(orig_mode)
                 blank_area.h = blank_area.h - self.view.page_gap.height
             end
             if blank_area.h > 0 then
-                self:_gotoPage(self.current_page + 1, "scrolling")
+                local next_page = self.ui.document:getNextPage(self.current_page)
+                if next_page == 0 then break end -- end of document reached
+                self:_gotoPage(next_page, "scrolling")
             end
         end
         self:_gotoPage(self.orig_page, "scrolling")
@@ -773,7 +760,7 @@ function ReaderPaging:updateTopPageState(state, blank_area, offset)
         w = blank_area.w,
         h = blank_area.h,
     }
-    if state.page == self.number_of_pages then
+    if self.ui.document:getNextPage(state.page) == 0 then -- last page
         visible_area:offsetWithin(state.page_area, offset.x, offset.y)
     else
         visible_area = visible_area:shrinkInside(state.page_area, offset.x, offset.y)
@@ -790,7 +777,7 @@ function ReaderPaging:updateBottomPageState(state, blank_area, offset)
         w = blank_area.w,
         h = blank_area.h,
     }
-    if state.page == 1 then
+    if self.ui.document:getPrevPage(state.page) == 0 then -- first page
         visible_area:offsetWithin(state.page_area, offset.x, offset.y)
     else
         visible_area = visible_area:shrinkInside(state.page_area, offset.x, offset.y)
@@ -818,10 +805,10 @@ function ReaderPaging:genPageStatesFromTop(top_page_state, blank_area, offset)
     while blank_area.h > 0 do
         blank_area.h = blank_area.h - self.view.page_gap.height
         if blank_area.h > 0 then
-            if current_page == self.number_of_pages then break end
-            self:_gotoPage(current_page + 1, "scrolling")
-            current_page = current_page + 1
-            state = self:getNextPageState(blank_area, Geom:new{})
+            current_page = self.ui.document:getNextPage(current_page)
+            if current_page == 0 then break end -- end of document reached
+            self:_gotoPage(current_page, "scrolling")
+            state = self:getNextPageState(blank_area, Geom:new())
             table.insert(page_states, state)
         end
     end
@@ -843,12 +830,22 @@ function ReaderPaging:genPageStatesFromBottom(bottom_page_state, blank_area, off
     while blank_area.h > 0 do
         blank_area.h = blank_area.h - self.view.page_gap.height
         if blank_area.h > 0 then
-            if current_page == 1 then break end
-            self:_gotoPage(current_page - 1, "scrolling")
-            current_page = current_page - 1
-            state = self:getPrevPageState(blank_area, Geom:new{})
+            current_page = self.ui.document:getPrevPage(current_page)
+            if current_page == 0 then break end -- start of document reached
+            self:_gotoPage(current_page, "scrolling")
+            state = self:getPrevPageState(blank_area, Geom:new())
             table.insert(page_states, 1, state)
         end
+    end
+    if current_page == 0 then
+        -- We reached the start of document: we may have truncated too much
+        -- of the bottom page while scrolling up.
+        -- Re-generate everything with first page starting at top
+        offset = Geom:new{x = 0, y = 0}
+        blank_area:setSizeTo(self.view.visible_area)
+        local first_page_state = page_states[1]
+        first_page_state.visible_area.y = 0 -- anchor first page at top
+        return self:genPageStatesFromTop(first_page_state, blank_area, offset)
     end
     return page_states
 end
@@ -857,7 +854,7 @@ function ReaderPaging:onScrollPanRel(diff)
     if diff == 0 then return true end
     logger.dbg("pan relative height:", diff)
     local offset = Geom:new{x = 0, y = diff}
-    local blank_area = Geom:new{}
+    local blank_area = Geom:new()
     blank_area:setSizeTo(self.view.visible_area)
     local new_page_states
     if diff > 0 then
@@ -894,14 +891,14 @@ function ReaderPaging:onScrollPageRel(page_diff)
         -- page down, last page should be moved to top
         local last_page_state = table.remove(self.view.page_states)
         local last_visible_area = last_page_state.visible_area
-        if last_page_state.page == self.number_of_pages and
+        if self.ui.document:getNextPage(last_page_state.page) == 0 and
                 last_visible_area.y + last_visible_area.h >= last_page_state.page_area.h then
             table.insert(self.view.page_states, last_page_state)
             self.ui:handleEvent(Event:new("EndOfBook"))
             return true
         end
 
-        local blank_area = Geom:new{}
+        local blank_area = Geom:new()
         blank_area:setSizeTo(self.view.visible_area)
         local overlap = self.overlap
         local offset = Geom:new{
@@ -911,7 +908,7 @@ function ReaderPaging:onScrollPageRel(page_diff)
         self.view.page_states = self:genPageStatesFromTop(last_page_state, blank_area, offset)
     elseif page_diff < 0 then
         -- page up, first page should be moved to bottom
-        local blank_area = Geom:new{}
+        local blank_area = Geom:new()
         blank_area:setSizeTo(self.view.visible_area)
         local overlap = self.overlap
         local first_page_state = table.remove(self.view.page_states, 1)
@@ -991,14 +988,41 @@ function ReaderPaging:onGotoPageRel(diff)
         goto_end(x, -x_diff)
     end
     local function goto_next_page()
-        local new_page = self.current_page + diff
+        local new_page
+        if self.ui.document:hasHiddenFlows() then
+            local forward = diff > 0
+            local pdiff = forward and math.ceil(diff) or math.ceil(-diff)
+            new_page = self.current_page
+            for i=1, pdiff do
+                local test_page = forward and self.ui.document:getNextPage(new_page)
+                                           or self.ui.document:getPrevPage(new_page)
+                if test_page == 0 then -- start or end of document reached
+                    if forward then
+                        new_page = self.number_of_pages + 1 -- to trigger EndOfBook below
+                    else
+                        new_page = 0
+                    end
+                    break
+                end
+                new_page = test_page
+            end
+        else
+            new_page = self.current_page + diff
+        end
         if new_page > self.number_of_pages then
             self.ui:handleEvent(Event:new("EndOfBook"))
             goto_end(y)
             goto_end(x)
         elseif new_page > 0 then
+            -- Be sure that the new and old view areas are reset so that no value is carried over to next page.
+            -- Without this, we would have panned_y = new_va.y - old_va.y > 0, and panned_y will be added to the next page's y direction.
+            -- This occurs when the current page has a y > 0 position (for example, a cropped page) and can fit the whole page height,
+            -- while the next page needs scrolling in the height.
             self:_gotoPage(new_page)
+            new_va = self.visible_area:copy()
+            old_va = self.visible_area
             goto_end(y, -y_diff)
+            goto_end(x, -x_diff)
         else
             goto_end(x)
         end
@@ -1107,7 +1131,18 @@ function ReaderPaging:onGotoPage(number, pos)
 end
 
 function ReaderPaging:onGotoRelativePage(number)
-    self:_gotoPage(self.current_page + number)
+    local new_page = self.current_page
+    local test_page = new_page
+    local forward = number > 0
+    for i=1, math.abs(number) do
+        test_page = forward and self.ui.document:getNextPage(test_page)
+                             or self.ui.document:getPrevPage(test_page)
+        if test_page == 0 then -- start or end of document reached
+            break
+        end
+        new_page = test_page
+    end
+    self:_gotoPage(new_page)
     return true
 end
 

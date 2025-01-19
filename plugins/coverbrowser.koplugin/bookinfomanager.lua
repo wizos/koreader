@@ -39,7 +39,7 @@ local BOOKINFO_DB_SCHEMA = [[
         cover_fetched       TEXT,     -- NULL / 'Y' = we tried to fetch a cover (but we may not have gotten one)
         has_meta            TEXT,     -- NULL / 'Y' = has metadata (title, authors...)
         has_cover           TEXT,     -- NULL / 'Y' = has cover image (cover_*)
-        cover_sizetag       TEXT,     -- 'M' (Medium, MosaicMenuItem) / 's' (small, ListMenuItem)
+        cover_sizetag       TEXT,     -- '1072x1448' (example, is the original cover image width and height)
 
         -- Other properties that can be set and returned as is (not used here)
         -- If user doesn't want to see these (wrong metadata, offending cover...)
@@ -87,14 +87,14 @@ local BOOKINFO_COLS_SET = {
         "cover_sizetag",
         "ignore_meta",
         "ignore_cover",
-        "pages",
+        "pages", -- 13: start index for getDocProps()
         "title",
         "authors",
         "series",
         "series_index",
         "language",
         "keywords",
-        "description",
+        "description", -- 20: end index for getDocProps()
         "cover_w",
         "cover_h",
         "cover_bb_type",
@@ -115,7 +115,7 @@ local BOOKINFO_SELECT_SQL = "SELECT " .. table.concat(BOOKINFO_COLS_SET, ",") ..
                             "WHERE directory=? AND filename=? AND in_progress=0;"
 local BOOKINFO_IN_PROGRESS_SQL = "SELECT in_progress, filename, unsupported FROM bookinfo WHERE directory=? AND filename=?;"
 
--- We need these _ litterals for them to be made available to translators. the english "string" is
+-- We need these _ literals for them to be made available to translators. the english "string" is
 -- what is inserted in the DB, and it will be translated only when read from the DB and displayed.
 local UNSUPPORTED_REASONS = {
     not_readable_by_engine = {
@@ -270,7 +270,7 @@ function BookInfoManager:loadSettings(db_conn)
         local keys = res[1]
         local values = res[2]
         for i, key in ipairs(keys) do
-            self.settings[key] = values[i]
+            self.settings[key] = tonumber(values[i]) or values[i] -- TEXT db field
         end
     end
 end
@@ -306,13 +306,19 @@ function BookInfoManager:saveSetting(key, value, db_conn, skip_reload)
         value = "Y"
     end
     stmt:bind(key, value)
-    stmt:step() -- commited
+    stmt:step() -- committed
     stmt:clearbind():reset() -- cleanup
 
     -- Optionally, reload settings, so we may get (or not if it failed) what we just saved
     if not skip_reload then
         self:loadSettings()
     end
+end
+
+function BookInfoManager:toggleSetting(key)
+    local value = not self:getSetting(key)
+    self:saveSetting(key, value)
+    return value
 end
 
 -- Bookinfo management
@@ -365,14 +371,14 @@ function BookInfoManager:getBookInfo(filepath, get_cover)
         end
         -- specific processing for cover columns
         if col == "cover_w" then
+            bookinfo["cover_w"] = tonumber(row[num])
+            bookinfo["cover_h"] = tonumber(row[num+1])
             if not get_cover then
                 -- don't bother making a blitbuffer
                 break
             end
             bookinfo["cover_bb"] = nil
             if bookinfo["has_cover"] then
-                bookinfo["cover_w"] = tonumber(row[num])
-                bookinfo["cover_h"] = tonumber(row[num+1])
                 local bbtype = tonumber(row[num+2])
                 local bbstride = tonumber(row[num+3])
                 -- This is a blob_mt table! Essentially, a (ptr, size) tuple.
@@ -394,6 +400,22 @@ function BookInfoManager:getBookInfo(filepath, get_cover)
     end
 
     self.get_stmt:clearbind():reset() -- get ready for next query
+    return bookinfo
+end
+
+function BookInfoManager:getDocProps(filepath)
+    local bookinfo
+    local directory, filename = util.splitFilePathName(filepath)
+    self:openDbConnection()
+    local row = self.get_stmt:bind(directory, filename):step()
+    if row ~= nil then
+        bookinfo = {}
+        for i = 13, 20 do
+            bookinfo[BOOKINFO_COLS_SET[i]] = row[i]
+        end
+        bookinfo.pages = tonumber(bookinfo.pages)
+    end
+    self.get_stmt:clearbind():reset()
     return bookinfo
 end
 
@@ -459,7 +481,7 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
     for num, col in ipairs(BOOKINFO_COLS_SET) do
         self.set_stmt:bind1(num, dbrow[col])
     end
-    self.set_stmt:step() -- commited
+    self.set_stmt:step() -- committed
     self.set_stmt:clearbind():reset() -- get ready for next query
     if tried_enough then
         return -- Last insert done for this book, we're giving up
@@ -500,23 +522,18 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                 dbrow[k] = v
             end
             if cover_specs then
-                local spec_sizetag = cover_specs.sizetag
                 local spec_max_cover_w = cover_specs.max_cover_w
                 local spec_max_cover_h = cover_specs.max_cover_h
-
                 dbrow.cover_fetched = 'Y' -- we had a try at getting a cover
                 local cover_bb = FileManagerBookInfo:getCoverImage(document)
                 if cover_bb then
                     dbrow.has_cover = 'Y'
-                    dbrow.cover_sizetag = spec_sizetag
                     -- we should scale down the cover to our max size
                     local cbb_w, cbb_h = cover_bb:getWidth(), cover_bb:getHeight()
-                    local scale_factor = 1
+                    dbrow.cover_sizetag = cbb_w .. "x" .. cbb_h -- store original cover size
                     if cbb_w > spec_max_cover_w or cbb_h > spec_max_cover_h then
                         -- scale down if bigger than what we will display
-                        scale_factor = math.min(spec_max_cover_w / cbb_w, spec_max_cover_h / cbb_h)
-                        cbb_w = math.min(math.floor(cbb_w * scale_factor)+1, spec_max_cover_w)
-                        cbb_h = math.min(math.floor(cbb_h * scale_factor)+1, spec_max_cover_h)
+                        cbb_w, cbb_h = BookInfoManager.getCachedCoverSize(cbb_w, cbb_h, spec_max_cover_w, spec_max_cover_h)
                         cover_bb = RenderImage:scaleBlitBuffer(cover_bb, cbb_w, cbb_h, true)
                     end
                     dbrow.cover_w = cover_bb.w
@@ -526,7 +543,8 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                     local cover_size = cover_bb.stride * cover_bb.h
                     local cover_zst_ptr, cover_zst_size = zstd.zstd_compress(cover_bb.data, cover_size)
                     dbrow.cover_bb_data = SQ3.blob(cover_zst_ptr, cover_zst_size) -- cast to blob for sqlite
-                    logger.dbg("cover for", filename, "scaled by", scale_factor, "=>", cover_bb.w, "x", cover_bb.h, ", compressed from", tonumber(cover_size), "to", tonumber(cover_zst_size))
+                    logger.dbg("cover for", filename, "scaled from", dbrow.cover_sizetag, "to", cover_bb.w, "x", cover_bb.h,
+                        ", compressed from", tonumber(cover_size), "to", tonumber(cover_zst_size))
                     -- We're done with the uncompressed bb now, and the compressed one has been managed by SQLite ;)
                     cover_bb:free()
                 end
@@ -564,7 +582,7 @@ function BookInfoManager:setBookInfoProperties(filepath, props)
             v = nil
         end
         stmt:bind(v, directory, filename)
-        stmt:step() -- commited
+        stmt:step() -- committed
         stmt:clearbind():reset() -- cleanup
     end
 end
@@ -575,7 +593,7 @@ function BookInfoManager:deleteBookInfo(filepath)
     local query = "DELETE FROM bookinfo WHERE directory=? AND filename=?;"
     local stmt = self.db_conn:prepare(query)
     stmt:bind(directory, filename)
-    stmt:step() -- commited
+    stmt:step() -- committed
     stmt:clearbind():reset() -- cleanup
 end
 
@@ -597,7 +615,7 @@ function BookInfoManager:removeNonExistantEntries()
     local stmt = self.db_conn:prepare(query)
     for i=1, #bcids_to_remove do
         stmt:bind(bcids_to_remove[i])
-        stmt:step() -- commited
+        stmt:step() -- committed
         stmt:clearbind():reset() -- cleanup
     end
     return T(_("Removed %1 / %2 entries from cache."), #bcids_to_remove, #bcids)
@@ -700,7 +718,7 @@ function BookInfoManager:extractInBackground(files)
     -- Run task in sub-process, and remember its pid
     local task_pid = FFIUtil.runInSubProcess(task)
     if not task_pid then
-        logger.warn("Failed lauching background extraction sub-process (fork failed)")
+        logger.warn("Failed launching background extraction sub-process (fork failed)")
         return false -- let caller know it failed
     end
     -- No straight control flow exists for background task completion here, so we bump prevent
@@ -880,10 +898,8 @@ Do you want to prune the cache of removed books?]]
                     local to_extract = not bookinfo
                     if bookinfo and cover_specs and not bookinfo.ignore_cover then
                         if bookinfo.cover_fetched then
-                            if bookinfo.has_cover and cover_specs.sizetag ~= bookinfo.cover_sizetag then
-                                if bookinfo.cover_sizetag ~= "M" then -- keep the bigger "M"
-                                    to_extract = true
-                                end
+                            if bookinfo.has_cover and BookInfoManager.isCachedCoverInvalid(bookinfo, cover_specs) then
+                                to_extract = true
                             end
                         else
                             to_extract = true
@@ -977,6 +993,38 @@ Do you want to prune the cache of removed books?]]
     UIManager:close(info)
     info = InfoMessage:new{text = T(_("Processed %1 / %2 books."), nb_done, nb_files) .. "\n" .. T(N_("One extracted successfully.", "%1 extracted successfully.", nb_success), nb_success)}
     UIManager:show(info)
+end
+
+function BookInfoManager.getCachedCoverSize(img_w, img_h, max_img_w, max_img_h)
+    local scale_factor
+    local width = math.floor(max_img_h * img_w / img_h + 0.5)
+    if max_img_w >= width then
+        max_img_w = width
+        scale_factor = max_img_w / img_w
+    else
+        max_img_h = math.floor(max_img_w * img_h / img_w + 0.5)
+        scale_factor = max_img_h / img_h
+    end
+    return max_img_w, max_img_h, scale_factor
+end
+
+function BookInfoManager.isCachedCoverInvalid(bookinfo, cover_specs)
+    if not bookinfo.cover_w or not bookinfo.cover_h then -- no thumbnail yet
+        return true
+    end
+    local img_w, img_h = bookinfo.cover_sizetag:match("(%d+)x(%d+)") -- original image
+    if not img_w or not img_h then -- old or bad cover_sizetag
+        return true
+    end
+    img_w, img_h = tonumber(img_w), tonumber(img_h)
+    local max_img_w = cover_specs.max_cover_w
+    local max_img_h = cover_specs.max_cover_h
+    if img_w > max_img_w or img_h > max_img_h then -- original image bigger than placeholder
+        local new_cover_w, new_cover_h = BookInfoManager.getCachedCoverSize(img_w, img_h, max_img_w, max_img_h)
+        if new_cover_w > bookinfo.cover_w or new_cover_h > bookinfo.cover_h then -- bigger thumbnail needed
+            return true
+        end
+    end
 end
 
 BookInfoManager:init()

@@ -36,14 +36,6 @@ DCREREADER_VIEW_MODE = "page",
 -- default to false
 DSHOWOVERLAP = false,
 
--- show hidden files in filemanager
--- default to false
-DSHOWHIDDENFILES = false,
-
--- landscape clockwise rotation
--- default to true, set to false for counterclockwise rotation
-DLANDSCAPE_CLOCKWISE_ROTATION = true,
-
 -- default minimum screen height for reading with 2 pages in landscape mode
 DCREREADER_TWO_PAGE_THRESHOLD = 7,
 
@@ -73,6 +65,10 @@ DTAP_ZONE_BOTTOM_LEFT = {x = 0, y = 7/8, w = 1/8, h = 1/8},
 DTAP_ZONE_BOTTOM_RIGHT = {x = 7/8, y = 7/8, w = 1/8, h = 1/8},
 DDOUBLE_TAP_ZONE_NEXT_CHAPTER = {x = 1/4, y = 0, w = 3/4, h = 1},
 DDOUBLE_TAP_ZONE_PREV_CHAPTER = {x = 0, y = 0, w = 1/4, h = 1},
+DSWIPE_ZONE_LEFT_EDGE = { x = 0, y = 0, w = 1/8, h = 1},
+DSWIPE_ZONE_RIGHT_EDGE = { x = 7/8, y = 0, w = 1/8, h = 1},
+DSWIPE_ZONE_TOP_EDGE = { x = 0, y = 0, w = 1, h = 1/8},
+DSWIPE_ZONE_BOTTOM_EDGE = { x = 0, y = 7/8, w = 1, h = 1/8},
 
 -- koptreader config defaults
 DKOPTREADER_CONFIG_FONT_SIZE = 1.0,        -- range from 0.1 to 3.0
@@ -92,7 +88,6 @@ DKOPTREADER_CONFIG_CONTRAST = 1.0,        -- range from 0.2 to 2.0
 DKOPTREADER_CONFIG_WORD_SPACINGS = {0.05, -0.2, 0.375},    -- range from (+/-)0.05 to (+/-)0.5
 DKOPTREADER_CONFIG_DEFAULT_WORD_SPACING = -0.2,            -- range from (+/-)0.05 to (+/-)0.5
 -- document languages for OCR
-DKOPTREADER_CONFIG_DOC_LANGS_TEXT = {"English", "Chinese"},
 DKOPTREADER_CONFIG_DOC_LANGS_CODE = {"eng", "chi_sim"},    -- language code, make sure you have corresponding training data
 DKOPTREADER_CONFIG_DOC_DEFAULT_LANG_CODE = "eng",          -- that have filenames starting with the language codes
 

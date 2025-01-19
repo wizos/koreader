@@ -94,34 +94,60 @@ local Screen = Device.screen
 local MultiInputDialog = InputDialog:extend{
     fields = nil, -- array, mandatory
     input_fields = nil, -- array
+    focused_field_idx = 1,
     description_padding = Size.padding.default,
     description_margin = Size.margin.small,
     bottom_v_padding = Size.padding.default,
+    enter_callback = nil, -- applied to all fields
 }
 
 function MultiInputDialog:init()
     -- init title and buttons in base class
     InputDialog.init(self)
+    -- Kick InputDialog's own field out of the layout, we're not using it
+    table.remove(self.layout, 1)
+    -- Also murder said input field *and* its VK, or we get two of them and shit gets hilariously broken real fast...
+    self:onCloseKeyboard()
+    self._input_widget:onCloseWidget()
+
+    -- Reset self.keyboard_visible because InputDialog:onCloseKeyboard sets it to false, which can lead to an incorrect keyboard
+    -- visibility state since we still might want our very own virtual keyboard.
+    if (Device:hasKeyboard() or Device:hasScreenKB()) and G_reader_settings:isFalse("virtual_keyboard_enabled") then
+        do end -- luacheck: ignore 541
+    elseif self.readonly then
+        do end -- luacheck: ignore 541
+    else
+        self.keyboard_visible = true
+    end
+
     local VerticalGroupData = VerticalGroup:new{
         align = "left",
         self.title_bar,
     }
+    local content_width = math.floor(self.width * 0.9)
 
-    self.input_field = {}
+    -- In case of reinit, murder our previous input widgets to prevent stale VK instances from lingering
+    if self.input_fields then
+        for i, widget in ipairs(self.input_fields) do
+            widget:onCloseWidget()
+        end
+    end
+    self.input_fields = {}
     local input_description = {}
     for i, field in ipairs(self.fields) do
-        self.input_field[i] = InputText:new{
-            text = field.text or "",
-            hint = field.hint or "",
-            input_type = field.input_type or "string",
-            text_type =  field.text_type,
+        local input_field_tmp = InputText:new{
+            text = field.text,
+            hint = field.hint,
+            input_type = field.input_type,
+            text_type = field.text_type, -- "password"
             face = self.input_face,
-            width = math.floor(self.width * 0.9),
-            focused = i == 1 and true or false,
+            width = content_width,
+            idx = i,
+            focused = i == self.focused_field_idx,
             scroll = false,
             parent = self,
-            padding = field.padding or nil,
-            margin = field.margin or nil,
+            padding = field.padding,
+            margin = field.margin,
             -- Allow these to be specified per field if needed
             alignment = field.alignment or self.alignment,
             justified = field.justified or self.justified,
@@ -129,8 +155,13 @@ function MultiInputDialog:init()
             para_direction_rtl = field.para_direction_rtl or self.para_direction_rtl,
             auto_para_direction = field.auto_para_direction or self.auto_para_direction,
             alignment_strict = field.alignment_strict or self.alignment_strict,
+            enter_callback = self.enter_callback,
         }
-        table.insert(self.layout, #self.layout, {self.input_field[i]})
+        table.insert(self.input_fields, input_field_tmp)
+        --- @fixme: This is semi-broken when text_type is password, as we actually end up with the checkbox instead of the field,
+        --          and a "Press" on the checkbox will actually focus the password field and *not* check the box.
+        -- addWidget may have added stuff below us, so make sure we insert above that...
+        table.insert(self.layout, i, { input_field_tmp })
         if field.description then
             input_description[i] = FrameContainer:new{
                 padding = self.description_padding,
@@ -139,7 +170,7 @@ function MultiInputDialog:init()
                 TextBoxWidget:new{
                     text = field.description,
                     face = Font:getFace("x_smallinfofont"),
-                    width = math.floor(self.width * 0.9),
+                    width = content_width,
                 }
             }
             table.insert(VerticalGroupData, CenterContainer:new{
@@ -153,9 +184,9 @@ function MultiInputDialog:init()
         table.insert(VerticalGroupData, CenterContainer:new{
             dimen = Geom:new{
                 w = self.title_bar:getSize().w,
-                h = self.input_field[i]:getSize().h,
+                h = input_field_tmp:getSize().h,
             },
-            self.input_field[i],
+            input_field_tmp,
         })
     end
 
@@ -185,34 +216,36 @@ function MultiInputDialog:init()
         VerticalGroupData,
     }
 
-    self._input_widget = self.input_field[1]
+    self._input_widget = self.input_fields[self.focused_field_idx]
 
+    local keyboard_height = self.keyboard_visible and self._input_widget:getKeyboardDimen().h or 0
     self[1] = CenterContainer:new{
         dimen = Geom:new{
             w = Screen:getWidth(),
-            h = Screen:getHeight() - self._input_widget:getKeyboardDimen().h,
+            h = Screen:getHeight() - keyboard_height,
         },
         ignore_if_over = "height",
         self.dialog_frame,
     }
+
+    if self._added_widgets then
+        for _, widget in ipairs(self._added_widgets) do
+            self:addWidget(widget, true)
+        end
+    end
+
     UIManager:setDirty(self, function()
         return "ui", self.dialog_frame.dimen
     end)
 
 end
 
---- Returns an array of our input field's *text* field.
 function MultiInputDialog:getFields()
     local fields = {}
-    for i, field in ipairs(self.input_field) do
+    for i, field in ipairs(self.input_fields) do
         table.insert(fields, field:getText())
     end
     return fields
-end
-
---- BEWARE: Live ref to an internal component!
-function MultiInputDialog:getRawFields()
-    return self.input_field
 end
 
 function MultiInputDialog:onSwitchFocus(inputbox)
@@ -228,10 +261,58 @@ function MultiInputDialog:onSwitchFocus(inputbox)
     -- focus new inputbox
     self._input_widget = inputbox
     self._input_widget:focus()
+    self.focused_field_idx = inputbox.idx
 
-    -- Make sure we have a (new) visible keyboard
+    if (Device:hasKeyboard() or Device:hasScreenKB()) and G_reader_settings:isFalse("virtual_keyboard_enabled") then
+        -- do not load virtual keyboard when user is hiding it.
+        return
+    end
+    -- Otherwise make sure we have a (new) visible keyboard
     self:onShowKeyboard()
 end
 
-return MultiInputDialog
+function MultiInputDialog:onKeyboardHeightChanged()
+    local visible = self:isKeyboardVisible()
+    local fields = self.input_fields -- backup entered text
+    self:onClose() -- will close keyboard and save view position
+    self._input_widget:onCloseWidget() -- proper cleanup of InputText and its keyboard
+    if self._added_widgets then
+        -- prevent these externally added widgets from being freed as :init() will re-add them
+        local vgroup = self.dialog_frame[1]
+        for i = 1, #self._added_widgets do
+            table.remove(vgroup, #vgroup-2)
+        end
+    end
+    self:free()
+    self.keyboard_visible = visible
+    for i, field in ipairs(self.fields) do -- restore entered text
+        field.text = fields[i].text
+    end
+    self:init()
+    if self.keyboard_visible then
+        self:onShowKeyboard()
+    end
+    UIManager:setDirty("all", "flashui")
+end
 
+function MultiInputDialog:addWidget(widget, re_init)
+    table.insert(self.layout, #self.layout, {widget})
+    if not re_init then -- backup widget for re-init
+        widget = CenterContainer:new{
+            dimen = Geom:new{
+                w = self.width,
+                h = widget:getSize().h,
+            },
+            widget,
+        }
+        if not self._added_widgets then
+            self._added_widgets = {}
+        end
+        table.insert(self._added_widgets, widget)
+    end
+    -- insert widget before the bottom buttons and their previous vspan
+    local vgroup = self.dialog_frame[1]
+    table.insert(vgroup, #vgroup-1, widget)
+end
+
+return MultiInputDialog

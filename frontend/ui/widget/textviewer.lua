@@ -10,6 +10,7 @@ Displays some text in a scrollable view.
 ]]
 local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
+local ButtonDialog = require("ui/widget/buttondialog")
 local ButtonTable = require("ui/widget/buttontable")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local CheckButton = require("ui/widget/checkbutton")
@@ -24,11 +25,13 @@ local MovableContainer = require("ui/widget/container/movablecontainer")
 local Notification = require("ui/widget/notification")
 local ScrollTextWidget = require("ui/widget/scrolltextwidget")
 local Size = require("ui/size")
+local TextBoxWidget = require("ui/widget/textboxwidget")
 local TitleBar = require("ui/widget/titlebar")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local T = require("ffi/util").template
+local lfs = require("libs/libkoreader-lfs")
 local util = require("util")
 local _ = require("gettext")
 local Screen = Device.screen
@@ -36,6 +39,7 @@ local Screen = Device.screen
 local TextViewer = InputContainer:extend{
     title = nil,
     text = nil,
+    charlist = nil, -- internal
     width = nil,
     height = nil,
     buttons_table = nil,
@@ -46,7 +50,6 @@ local TextViewer = InputContainer:extend{
     -- When used to display more technical text (HTML, CSS,
     -- application logs...), it's best to reset them to false.
     alignment = "left",
-    justified = true,
     lang = nil,
     para_direction_rtl = nil,
     auto_para_direction = true,
@@ -55,7 +58,12 @@ local TextViewer = InputContainer:extend{
     title_face = nil, -- use default from TitleBar
     title_multilines = nil, -- see TitleBar for details
     title_shrink_font_to_fit = nil, -- see TitleBar for details
-    text_face = Font:getFace("x_smallinfofont"),
+
+    show_menu = true, -- titlebar left icon
+    monospace_font = nil, -- internal
+    text_font_size = nil, -- internal
+    justified = nil, -- internal
+
     fgcolor = Blitbuffer.COLOR_BLACK,
     text_padding = Size.padding.large,
     text_margin = Size.margin.small,
@@ -64,18 +72,38 @@ local TextViewer = InputContainer:extend{
     add_default_buttons = nil,
     default_hold_callback = nil, -- on each default button
     find_centered_lines_count = 5, -- line with find results to be not far from the center
+
+    text_type = "general",
+    text_types = {
+        general      = { monospace_font = false, font_size = 20, justified = false },
+        file_content = { monospace_font = false, font_size = 20, justified = false },
+        book_info    = { monospace_font = false, font_size = 20, justified =  true },
+        bookmark     = { monospace_font = false, font_size = 20, justified =  true },
+        lookup       = { monospace_font = false, font_size = 20, justified = false },
+        code         = { monospace_font =  true, font_size = 16, justified = false },
+    },
 }
 
-function TextViewer:init()
-    -- calculate window dimension
+function TextViewer:init(reinit)
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+
     self.align = "center"
     self.region = Geom:new{
-        x = 0, y = 0,
-        w = Screen:getWidth(),
-        h = Screen:getHeight(),
+        w = screen_w,
+        h = screen_h,
     }
-    self.width = self.width or Screen:getWidth() - Screen:scaleBySize(30)
-    self.height = self.height or Screen:getHeight() - Screen:scaleBySize(30)
+    self.width = self.width or screen_w - Screen:scaleBySize(30)
+    self.height = self.height or screen_h - Screen:scaleBySize(30)
+
+    if not reinit then
+        local text_types = G_reader_settings:readSetting("textviewer_text_types")
+        local text_settings = text_types and text_types[self.text_type] or self.text_types[self.text_type]
+        self.monospace_font = text_settings.monospace_font
+        self.text_font_size = text_settings.font_size
+        self.justified      = text_settings.justified
+    end
+    local text_font_face = self.monospace_font and "smallinfont" or "x_smallinfofont"
 
     self._find_next = false
     self._find_next_button = false
@@ -83,13 +111,13 @@ function TextViewer:init()
 
     if Device:hasKeys() then
         self.key_events.Close = { { Device.input.group.Back } }
+        self.key_events.ShowMenu = { { "Menu" } }
     end
 
     if Device:isTouchDevice() then
         local range = Geom:new{
-            x = 0, y = 0,
-            w = Screen:getWidth(),
-            h = Screen:getHeight(),
+            w = screen_w,
+            h = screen_h,
         }
         self.ges_events = {
             TapClose = {
@@ -140,7 +168,7 @@ function TextViewer:init()
         }
     end
 
-    local titlebar = TitleBar:new{
+    self.titlebar = TitleBar:new{
         width = self.width,
         align = "left",
         with_bottom_line = true,
@@ -148,6 +176,8 @@ function TextViewer:init()
         title_face = self.title_face,
         title_multilines = self.title_multilines,
         title_shrink_font_to_fit = self.title_shrink_font_to_fit,
+        left_icon = self.show_menu and "appbar.menu",
+        left_icon_tap_callback = function() self:onShowMenu() end,
         close_callback = function() self:onClose() end,
         show_parent = self,
     }
@@ -233,7 +263,7 @@ function TextViewer:init()
             },
         }
     local buttons = self.buttons_table or {}
-    if self.add_default_buttons or not self.buttons_table then
+    if (self.add_default_buttons and not reinit) or not self.buttons_table then
         table.insert(buttons, default_buttons)
     end
     self.button_table = ButtonTable:new{
@@ -243,11 +273,18 @@ function TextViewer:init()
         show_parent = self,
     }
 
-    local textw_height = self.height - titlebar:getHeight() - self.button_table:getSize().h
+    -- NT: add titlebar.left_button (hamburger menu) to FocusManager.
+    if Device:hasDPad() and not (Device:hasSymKey() or Device:hasScreenKB()) then
+        table.insert(self.button_table.layout, 1, { self.titlebar.left_button })
+        -- Refocus on the updated layout
+        self.button_table:refocusWidget()
+    end
+
+    local textw_height = self.height - self.titlebar:getHeight() - self.button_table:getSize().h
 
     self.scroll_text_w = ScrollTextWidget:new{
         text = self.text,
-        face = self.text_face,
+        face = Font:getFace(text_font_face, self.text_font_size),
         fgcolor = self.fgcolor,
         width = self.width - 2*self.text_padding - 2*self.text_margin,
         height = textw_height - 2*self.text_padding -2*self.text_margin,
@@ -273,7 +310,7 @@ function TextViewer:init()
         margin = 0,
         background = Blitbuffer.COLOR_WHITE,
         VerticalGroup:new{
-            titlebar,
+            self.titlebar,
             CenterContainer:new{
                 dimen = Geom:new{
                     w = self.width,
@@ -302,6 +339,7 @@ function TextViewer:init()
             -- a few things before forwarding them
             "touch", "pan", "pan_release",
         },
+        anchor = self.anchor,
         self.frame,
     }
     self[1] = WidgetContainer:new{
@@ -309,6 +347,10 @@ function TextViewer:init()
         dimen = self.region,
         self.movable,
     }
+end
+
+function TextViewer:getContentSize()
+    return self.movable.dimen
 end
 
 function TextViewer:onCloseWidget()
@@ -415,13 +457,21 @@ function TextViewer:onForwardingPan(arg, ges)
 end
 
 function TextViewer:onForwardingPanRelease(arg, ges)
+    -- Allow scrolling with the mousewheel
+    if ges.from_mousewheel and ges.relative and ges.relative.y then
+        if ges.relative.y < 0 then
+            self.scroll_text_w:scrollText(1)
+        elseif ges.relative.y > 0 then
+            self.scroll_text_w:scrollText(-1)
+        end
+        return true
+    end
     -- We can forward onMovablePanRelease() does enough checks
     return self.movable:onMovablePanRelease(arg, ges)
 end
 
-
 function TextViewer:findDialog()
-    local input_dialog
+    local input_dialog, check_button_case
     input_dialog = InputDialog:new{
         title = _("Enter text to search for"),
         input = self.search_value,
@@ -429,6 +479,7 @@ function TextViewer:findDialog()
             {
                 {
                     text = _("Cancel"),
+                    id = "close",
                     callback = function()
                         UIManager:close(input_dialog)
                     end,
@@ -451,15 +502,15 @@ function TextViewer:findDialog()
             },
         },
     }
-    self.check_button_case = CheckButton:new{
+    check_button_case = CheckButton:new{
         text = _("Case sensitive"),
         checked = self.case_sensitive,
         parent = input_dialog,
         callback = function()
-            self.case_sensitive = self.check_button_case.checked
+            self.case_sensitive = check_button_case.checked
         end,
     }
-    input_dialog:addWidget(self.check_button_case)
+    input_dialog:addWidget(check_button_case)
 
     UIManager:show(input_dialog)
     input_dialog:onShowKeyboard(true)
@@ -480,9 +531,12 @@ function TextViewer:findCallback(input_dialog)
             start_pos = (charpos or 0) + 1 -- previous search result
         end
     end
-    local char_pos = util.stringSearch(self.text, self.search_value, self.case_sensitive, start_pos)
+    local char_pos, search_charlist
+    char_pos, self.charlist, search_charlist =
+        util.stringSearch(self.charlist or self.text, self.search_value, self.case_sensitive, start_pos)
     local msg
     if char_pos > 0 then
+        self:setTextBold(char_pos, #search_charlist)
         self.scroll_text_w:moveCursorToCharPos(char_pos, self.find_centered_lines_count)
         msg = T(_("Found, screen line %1."), self.scroll_text_w:getCharPosLineNum())
         self._find_next = true
@@ -515,6 +569,141 @@ function TextViewer:handleTextSelection(text, hold_duration, start_idx, end_idx,
             text = start_idx == end_idx and _("Word copied to clipboard.")
                                          or _("Selection copied to clipboard."),
         })
+    end
+end
+
+function TextViewer:reinit()
+    local text_settings = G_reader_settings:readSetting("textviewer_text_types", {})
+    text_settings[self.text_type] = { monospace_font = self.monospace_font, font_size = self.text_font_size, justified = self.justified }
+    local low, high = self.scroll_text_w.text_widget:getVisibleHeightRatios() -- try to keep position
+    local ratio = low == 0 and 0 or (low + high) / 2 -- if we are at the beginning, keep the first line visible
+    self:init(true) -- do not add default buttons once more
+    UIManager:setDirty("all", "partial", self.frame.dimen)
+    self.scroll_text_w:scrollToRatio(ratio, ratio == 0)
+end
+
+function TextViewer:setTextBold(start_pos, len)
+    local end_pos = start_pos + len
+    local text = self.text
+    if self.charlist == nil then
+        self.charlist = util.splitToChars(text)
+    end
+    local charlist = { TextBoxWidget.PTF_HEADER }
+    for i, char in ipairs(self.charlist) do
+        if i == start_pos then
+            table.insert(charlist, TextBoxWidget.PTF_BOLD_START)
+        elseif i == end_pos then
+            table.insert(charlist, TextBoxWidget.PTF_BOLD_END)
+        end
+        table.insert(charlist, char)
+    end
+    self.text = table.concat(charlist)
+    self:reinit()
+    self.text = text -- restore original text
+end
+
+function TextViewer:onShowMenu()
+    local dialog
+    local buttons = {
+        {{
+            text_func = function()
+                return T(_("Font size: %1"), self.text_font_size)
+            end,
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                local SpinWidget = require("ui/widget/spinwidget")
+                local widget = SpinWidget:new{
+                    title_text = _("Font size"),
+                    value = self.text_font_size,
+                    value_min = 12,
+                    value_max = 30,
+                    default_value = self.monospace_font and 16 or 20,
+                    keep_shown_on_apply = true,
+                    callback = function(spin)
+                        self.text_font_size = spin.value
+                        self:reinit()
+                    end,
+                }
+                UIManager:show(widget)
+            end,
+        }},
+        {{
+            text = _("Monospace font"),
+            checked_func = function()
+                return self.monospace_font
+            end,
+            align = "left",
+            callback = function()
+                self.monospace_font = not self.monospace_font
+                self:reinit()
+            end,
+        }},
+        {{
+            text = _("Justify"),
+            checked_func = function()
+                return self.justified
+            end,
+            align = "left",
+            callback = function()
+                self.justified = not self.justified
+                self:reinit()
+            end,
+        }},
+    }
+    dialog = ButtonDialog:new{
+        shrink_unneeded_width = true,
+        buttons = buttons,
+        anchor = function()
+            return self.titlebar.left_button.image.dimen
+        end,
+    }
+    UIManager:show(dialog)
+end
+
+-- Register DocumentRegistry auxiliary provider.
+function TextViewer:register(registry)
+    registry:addAuxProvider({
+        provider_name = _("Text viewer"),
+        provider = "textviewer",
+        order = 20, -- order in OpenWith dialog
+        enabled_func = function()
+            return true -- all files
+        end,
+        callback = TextViewer.openFile,
+        disable_file = true,
+        disable_type = false,
+    })
+end
+
+function TextViewer.openFile(file)
+    local function _openFile(file_path)
+        local file_handle = io.open(file_path, "rb")
+        if not file_handle then return end
+        local file_content = file_handle:read("*all")
+        file_handle:close()
+        UIManager:show(TextViewer:new{
+            title = file_path,
+            title_multilines = true,
+            text = file_content,
+            text_type = "file_content",
+        })
+    end
+    local attr = lfs.attributes(file)
+    if attr then
+        if attr.size > 400000 then
+            local ConfirmBox = require("ui/widget/confirmbox")
+            UIManager:show(ConfirmBox:new{
+                text = T(_("This file is %2:\n\n%1\n\nAre you sure you want to open it?\n\nOpening big files may take some time."),
+                    BD.filepath(file), util.getFriendlySize(attr.size)),
+                ok_text = _("Open"),
+                ok_callback = function()
+                    _openFile(file)
+                end,
+            })
+        else
+            _openFile(file)
+        end
     end
 end
 

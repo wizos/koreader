@@ -36,12 +36,13 @@ local Screen = require("device").screen
 local TextBoxWidget = InputContainer:extend{
     text = nil,
     editable = false, -- Editable flag for whether drawing the cursor or not.
+    select_mode = nil, -- select mode in InputText, wider cursor line
     justified = false, -- Should text be justified (spaces widened to fill width)
     alignment = "left", -- or "center", "right"
     dialog = nil, -- parent dialog that will be set dirty
     face = nil,
-    bold = nil,   -- use bold=true to use a real bold font (or synthetized if not available),
-                  -- or bold=Font.FORCE_SYNTHETIZED_BOLD to force using synthetized bold,
+    bold = nil,   -- use bold=true to use a real bold font (or synthesized if not available),
+                  -- or bold=Font.FORCE_SYNTHETIZED_BOLD to force using synthesized bold,
                   -- which, with XText, makes a bold string the same width as it non-bolded.
     line_height = 0.3, -- in em
     fgcolor = Blitbuffer.COLOR_BLACK,
@@ -66,6 +67,16 @@ local TextBoxWidget = InputContainer:extend{
     cursor_line = nil, -- LineWidget to draw the vertical cursor.
     _bb = nil,
     _face_adjusted = nil,
+
+    highlight_text_selection = false, -- if true then the selected text will be highlighted
+    highlight_rects = nil,
+    highlight_start_idx = nil,
+    highlight_end_idx = nil,
+    highlight_start_line = nil,
+    highlight_end_line = nil,
+    highlight_clear_and_redraw_action = nil,
+    hold_start_pos = nil,
+    hold_end_pos = nil,
 
     -- We can provide a list of images: each image will be displayed on each
     -- scrolled page, in its top right corner (if more images than pages, remaining
@@ -100,7 +111,7 @@ local TextBoxWidget = InputContainer:extend{
     auto_para_direction = false, -- detect direction of each paragraph in text
                                  -- (para_direction_rtl or UI language is then only
                                  -- used as a weak hint about direction)
-    alignment_strict = false, -- true to force the alignemnt set by the alignment= attribute.
+    alignment_strict = false, -- true to force the alignment set by the alignment= attribute.
                               -- When false, specified alignment is inverted when para direction is RTL
     tabstop_nb_space_width = 8, -- unscaled_size_check: ignore
                                 -- width of tabstops, as a factor of the width of a space
@@ -110,6 +121,17 @@ local TextBoxWidget = InputContainer:extend{
 
     -- for internal use
     for_measurement_only = nil, -- When the widget is a one-off used to compute text height
+
+    -- Some Poor Text Formatting (PTF, not not to be confused with Richer RTF :)) can be done
+    -- by embedding some chars in self.text (these codepoints are not part of Unicode, so
+    -- hopefully not present naturally in any provided self.text).
+    PTF_HEADER = "\u{FFF1}", -- should be put at start of 'text' to indicate we may find other PTF_ chars
+    PTF_BOLD_START = "\u{FFF2}", -- start a sequence of bold chars
+    PTF_BOLD_END = "\u{FFF3}",   -- end a sequence of bold chars
+    _ptf_char_is_bold = nil,
+        -- This uses fake/synthetic bold, making each glyph bolder without modifying advance.
+        -- Some other possible formatting we could implement is different alignment (center,
+        -- right) of some lines in the provided text.
 }
 
 function TextBoxWidget:init()
@@ -137,9 +159,10 @@ function TextBoxWidget:init()
         self.line_glyph_extra_height = -line_heights_diff
     end
 
+    self.highlight_lighten_factor = G_reader_settings:readSetting("highlight_lighten_factor", 0.2)
     self.cursor_line = LineWidget:new{
         dimen = Geom:new{
-            w = Size.line.medium,
+            w = self.select_mode and 3*Size.line.medium or Size.line.medium,
             h = self.line_height_px,
         }
     }
@@ -152,6 +175,41 @@ function TextBoxWidget:init()
         -- if no self.height, these will be set just after self:_splitToLines()
         self.lines_per_page = math.floor(self.height / self.line_height_px)
         self.text_height = self.lines_per_page * self.line_height_px
+    end
+
+    -- Check for Poor Text Formatting
+    if not self.charlist and self.text and type(self.text) == "string"
+            and self.text:sub(1, #TextBoxWidget.PTF_HEADER) == TextBoxWidget.PTF_HEADER then
+        -- Support for very simple text styling (bold only for now)
+        self._ptf_char_is_bold = {}
+        -- Alas, we can't let any of our flag characters be fed to xtext (even with ASCII control
+        -- chars, it would give them a width, which would result at best in spurious added spacing).
+        -- So, split text into a table of chars, filter our flags out keeping track of where they
+        -- start and end bold, and rebuild self.text without them.
+        local charlist = util.splitToChars(self.text)
+        table.remove(charlist, 1)
+        local is_bold = false
+        local len = #charlist
+        local i = 1
+        while i <= len do
+            local ch = charlist[i]
+            if ch == TextBoxWidget.PTF_BOLD_START then
+                is_bold = true
+                table.remove(charlist, i)
+                len = len - 1
+            elseif ch == TextBoxWidget.PTF_BOLD_END then
+                is_bold = false
+                table.remove(charlist, i)
+                len = len - 1
+            else
+                if is_bold then
+                    self._ptf_char_is_bold[i] = true
+                end
+                i = i + 1
+            end
+        end
+        self.text = table.concat(charlist, "")
+        charlist = nil -- luacheck: no unused
     end
 
     self:_computeTextDimensions()
@@ -357,11 +415,11 @@ function TextBoxWidget:_splitToLines()
             end
             self.vertical_string_list[ln] = line
             if line.no_allowed_break_met then
-                -- let the fact a long word was splitted be known
+                -- let the fact a long word was split be known
                 self.has_split_inside_word = true
             end
             if line.hard_newline_at_eot and not line.next_start_offset then
-                -- Add an empty line to reprensent the \n at end of text
+                -- Add an empty line to represent the \n at end of text
                 -- and allow positioning cursor after it
                 self.vertical_string_list[ln+1] = {
                     offset = size+1,
@@ -413,7 +471,7 @@ function TextBoxWidget:_splitToLines()
                 -- either a very long english word occupying more than one line,
                 -- or the excessive char is itself splittable:
                 -- we let that excessive char for next line
-                if adjusted_idx == offset then -- let the fact a long word was splitted be known
+                if adjusted_idx == offset then -- let the fact a long word was split be known
                     self.has_split_inside_word = true
                 end
                 end_offset = idx - 1
@@ -432,7 +490,7 @@ function TextBoxWidget:_splitToLines()
                 idx = adjusted_idx + 1
             end
             if self.justified then
-                -- this line was splitted and can be justified
+                -- this line was split and can be justified
                 -- we record in idx_pad the nb of pixels to add to each char
                 -- to make the whole line justified. This also helps hold
                 -- position accuracy.
@@ -789,11 +847,18 @@ function TextBoxWidget:_renderText(start_row_idx, end_row_idx)
     h = h + self.line_glyph_extra_height
     if self._bb then self._bb:free() end
     local bbtype = nil
-    if self.line_num_to_image and self.line_num_to_image[start_row_idx] then
+    local color_fg = not Blitbuffer.isColor8(self.fgcolor)
+    local color_bg = not Blitbuffer.isColor8(self.bgcolor)
+    -- Color, whether from images or fg or bg, means we'll need an RGB32 buffer (if it makes sense, e.g., on a color screen).
+    if (self.line_num_to_image and self.line_num_to_image[start_row_idx]) or color_fg or color_bg then
         bbtype = Screen:isColorEnabled() and Blitbuffer.TYPE_BBRGB32 or Blitbuffer.TYPE_BB8
     end
     self._bb = Blitbuffer.new(self.width, h, bbtype)
-    self._bb:fill(self.bgcolor)
+    if not color_bg then
+        self._bb:fill(self.bgcolor)
+    else
+        self._bb:paintRectRGB32(0, 0, self._bb:getWidth(), self._bb:getHeight(), self.bgcolor)
+    end
 
     local y = self.line_glyph_baseline
     if self.use_xtext then
@@ -802,7 +867,7 @@ function TextBoxWidget:_renderText(start_row_idx, end_row_idx)
             if self.line_with_ellipsis and i == self.line_with_ellipsis and not line.ellipsis_added then
                 -- Requested to add an ellipsis on this line
                 local ellipsis_width = RenderText:getEllipsisWidth(self.face)
-                    -- no bold: xtext does synthetized bold with normal metrics
+                    -- no bold: xtext does synthesized bold with normal metrics
                 line.width = line.width + ellipsis_width
                 if line.width > line.targeted_width then
                     -- The ellipsis would overflow: we need to re-makeLine()
@@ -822,15 +887,23 @@ function TextBoxWidget:_renderText(start_row_idx, end_row_idx)
                 for _, xglyph in ipairs(line.xglyphs) do
                     if not xglyph.no_drawing then
                         local face = self.face.getFallbackFont(xglyph.font_num) -- callback (not a method)
-                        local glyph = RenderText:getGlyphByIndex(face, xglyph.glyph, self.bold)
+                        local bolder = self._ptf_char_is_bold and self._ptf_char_is_bold[xglyph.text_index] or false
+                        local glyph = RenderText:getGlyphByIndex(face, xglyph.glyph, self.bold, bolder)
                         local color = self.fgcolor
                         if self._alt_color_for_rtl then
                             color = xglyph.is_rtl and Blitbuffer.COLOR_DARK_GRAY or Blitbuffer.COLOR_BLACK
                         end
-                        self._bb:colorblitFrom(glyph.bb,
-                                    xglyph.x0 + glyph.l + xglyph.x_offset,
-                                    y - glyph.t - xglyph.y_offset,
-                                    0, 0, glyph.bb:getWidth(), glyph.bb:getHeight(), color)
+                        if not color_fg then
+                            self._bb:colorblitFrom(glyph.bb,
+                                        xglyph.x0 + glyph.l + xglyph.x_offset,
+                                        y - glyph.t - xglyph.y_offset,
+                                        0, 0, glyph.bb:getWidth(), glyph.bb:getHeight(), color)
+                        else
+                            self._bb:colorblitFromRGB32(glyph.bb,
+                                        xglyph.x0 + glyph.l + xglyph.x_offset,
+                                        y - glyph.t - xglyph.y_offset,
+                                        0, 0, glyph.bb:getWidth(), glyph.bb:getHeight(), color)
+                        end
                     end
                 end
             end
@@ -838,6 +911,13 @@ function TextBoxWidget:_renderText(start_row_idx, end_row_idx)
         end
         -- Render image if any
         self:_renderImage(start_row_idx)
+
+        if self.highlight_rects then
+            for _, rect in ipairs(self.highlight_rects) do
+                self._bb:darkenRect(rect.x, rect.y, rect.w, rect.h, self.highlight_lighten_factor)
+            end
+        end
+
         return
     end
 
@@ -871,12 +951,21 @@ function TextBoxWidget:_renderText(start_row_idx, end_row_idx)
 
     -- Render image if any
     self:_renderImage(start_row_idx)
+
+    if self.highlight_rects then
+        for _, rect in ipairs(self.highlight_rects) do
+            self._bb:darkenRect(rect.x, rect.y, rect.w, rect.h, self.highlight_lighten_factor)
+        end
+    end
 end
 
 -- Lay out the full text, starting at the current line.
 -- (NOTE: This instantiates the inner bb (self._bb), so be careful about its lifecycle when you call this,
 --        c.f., TextBoxWidget:update).
-function TextBoxWidget:_updateLayout()
+function TextBoxWidget:_updateLayout(update_highlight)
+    if self.highlight_text_selection and (update_highlight == nil or update_highlight) then
+        self:updateHighlight()
+    end
     self:_renderText(self.virtual_line_num, self.virtual_line_num + self.lines_per_page - 1)
 end
 
@@ -965,7 +1054,7 @@ function TextBoxWidget:_renderImage(start_row_idx)
             margin = 0,
             padding = 0,
             RightContainer:new{
-                dimen = {
+                dimen = Geom:new{
                     w = image.width,
                     h = status_height,
                 },
@@ -1142,7 +1231,7 @@ function TextBoxWidget:getSize()
         self:_updateLayout()
     end
 
-    return Geom:new{w = self.width, h = self._bb:getHeight()}
+    return Geom:new{x = 0, y = 0, w = self.width, h = self._bb:getHeight()}
 end
 
 function TextBoxWidget:paintTo(bb, x, y)
@@ -1179,7 +1268,7 @@ function TextBoxWidget:free(full)
     if full ~= false then -- final free(): free all remaining resources
         if self.use_xtext and self._xtext then
             -- Allow not waiting until Lua gc() to cleanup C XText malloc'ed stuff
-            -- (we should not free it if full=false as it is re-usable across renderings)
+            -- (we should not free it if full=false as it is reusable across renderings)
             self._xtext:free()
             self._xtext = nil
             -- logger.dbg("TextBoxWidget:_xtext:free()")
@@ -1395,7 +1484,7 @@ function TextBoxWidget:_getXYForCharPos(charpos)
         charpos = self.charpos
     end
     if self.text == nil or string.len(self.text) == 0 then
-        return 0, 0
+        return 0, 0, 1
     end
     -- Find the line number: scan up/down from current virtual_line_num
     local ln = self.height == nil and 1 or self.virtual_line_num
@@ -1596,7 +1685,7 @@ function TextBoxWidget:moveCursorToCharPos(charpos)
     self.charpos = charpos
     self.prev_virtual_line_num = self.virtual_line_num
     local x, y, screen_line_num = self:_getXYForCharPos() -- we can get y outside current view
-    self.current_line_num = screen_line_num
+    self.current_line_num = screen_line_num + self.virtual_line_num - 1
     -- adjust self.virtual_line_num for overflowed y to have y in current view
     if y < 0 then
         local scroll_lines = math.ceil( -y / self.line_height_px )
@@ -1612,7 +1701,7 @@ function TextBoxWidget:moveCursorToCharPos(charpos)
         -- needs to deal with possible overflow ?
         y = y - scroll_lines * self.line_height_px
     end
-    -- We can also get x ouside current view, when a line takes the full width
+    -- We can also get x outside current view, when a line takes the full width
     -- (which happens when text is justified): move the cursor a bit to the left
     -- (it will be drawn over the right of the last glyph, which should be ok.)
     if x > self.width - self.cursor_line.dimen.w then
@@ -1649,7 +1738,7 @@ function TextBoxWidget:moveCursorToCharPos(charpos)
                 self._bb:blitFrom(self.cursor_restore_bb, self.cursor_restore_x, self.cursor_restore_y,
                     0, 0, self.cursor_line.dimen.w, self.cursor_line.dimen.h)
                 -- remember current values for use in the setDirty funcs, as
-                -- we will have overriden them when these are called
+                -- we will have overridden them when these are called
                 restore_x = self.cursor_restore_x
                 restore_y = self.cursor_restore_y
                 if not CURSOR_COMBINE_REGIONS then
@@ -1838,7 +1927,7 @@ function TextBoxWidget:moveCursorDown()
 end
 
 function TextBoxWidget:moveCursorHome()
-    self:moveCursorToCharPos(self.vertical_string_list[self.current_line_num].offset)
+    self:moveCursorToCharPos(self.vertical_string_list[self.current_line_num] and self.vertical_string_list[self.current_line_num].offset or 1)
 end
 
 function TextBoxWidget:moveCursorEnd()
@@ -1877,7 +1966,7 @@ function TextBoxWidget:onHoldWord(callback, ges)
                 local words = util.splitToWords(self:_getLineText(line))
                 local probe_idx = char_start
                 for _, w in ipairs(words) do
-                    -- +1 for word separtor
+                    -- +1 for word separator
                     probe_idx = probe_idx + #util.splitToChars(w)
                     if idx <= probe_idx - 1 then
                         callback(w)
@@ -1891,7 +1980,7 @@ function TextBoxWidget:onHoldWord(callback, ges)
     end
 end
 
--- Allow selection of one or more words (with no visual feedback)
+-- Allow selection of one or more words
 -- Gestures should be declared in widget using us (e.g dictquicklookup.lua)
 
 -- Constants for which side of a word to find
@@ -1900,13 +1989,26 @@ local FIND_END = 2
 
 function TextBoxWidget:onHoldStartText(_, ges)
     -- store hold start position and timestamp, will be used on release
-    self.hold_start_x = ges.pos.x - self.dimen.x
-    self.hold_start_y = ges.pos.y - self.dimen.y
 
-    -- check coordinates are actually inside our area
-    if self.hold_start_x < 0 or self.hold_start_x > self.dimen.w or
-        self.hold_start_y < 0 or self.hold_start_y > self.dimen.h then
-        self.hold_start_time = nil -- don't process coming HoldRelease event
+    local pos = Geom:new{
+        x = ges.pos.x - self.dimen.x,
+        y = ges.pos.y - self.dimen.y,
+    }
+
+    -- check if the coordinates are actually inside our area
+    if pos.x < 0 or pos.x >= self.dimen.w or pos.y < 0 or pos.y >= self.dimen.h then
+        pos = nil
+    end
+
+    self.hold_start_pos = pos
+    self.hold_end_pos = pos
+    self:unscheduleClearHighlightAndRedraw()
+
+    if self:updateHighlight() then
+        self:redrawHighlight()
+    end
+
+    if not self.hold_start_pos then
         return false -- let event be processed by other widgets
     end
 
@@ -1915,11 +2017,21 @@ function TextBoxWidget:onHoldStartText(_, ges)
 end
 
 function TextBoxWidget:onHoldPanText(_, ges)
-    -- We don't highlight the currently selected text, but just let this
-    -- event pop up if we are not currently selecting text
-    if not self.hold_start_time then
+    -- Let this event pop up if we are not currently selecting text
+    if not self.hold_start_pos then
         return false
     end
+
+    self.hold_end_pos = Geom:new{
+        x = ges.pos.x - self.dimen.x,
+        y = ges.pos.y - self.dimen.y,
+    }
+
+    if self:updateHighlight() then
+        self.hold_start_time = UIManager:getTime()
+        self:redrawHighlight()
+    end
+
     -- Don't let that event be processed by other widget
     return true
 end
@@ -1927,19 +2039,18 @@ end
 function TextBoxWidget:onHoldReleaseText(callback, ges)
     if not callback then return end
 
-    local hold_end_x = ges.pos.x - self.dimen.x
-    local hold_end_y = ges.pos.y - self.dimen.y
-
     -- check we have seen a HoldStart event
-    if not self.hold_start_time then
+    if not self.hold_start_pos then
         return false
     end
-    -- check start and end coordinates are actually inside our area
-    if self.hold_start_x < 0 or hold_end_x < 0 or
-        self.hold_start_x > self.dimen.w or hold_end_x > self.dimen.w or
-        self.hold_start_y < 0 or hold_end_y < 0 or
-        self.hold_start_y > self.dimen.h or hold_end_y > self.dimen.h then
-        return false
+
+    self.hold_end_pos = Geom:new{
+        x = ges.pos.x - self.dimen.x,
+        y = ges.pos.y - self.dimen.y,
+    }
+
+    if self:updateHighlight() then
+        self:redrawHighlight()
     end
 
     local hold_duration = time.now() - self.hold_start_time
@@ -1948,7 +2059,7 @@ function TextBoxWidget:onHoldReleaseText(callback, ges)
     -- with it directly
     if self.line_num_to_image and self.line_num_to_image[self.virtual_line_num] then
         local image = self.line_num_to_image[self.virtual_line_num]
-        if hold_end_x > self.width - image.width and hold_end_y < image.height then
+        if self.hold_end_pos.x > self.width - image.width and self.hold_end_pos.y < image.height then
             -- Only if low-res image is loaded, so we have something to display
             -- if high-res loading is not implemented or if its loading fails
             if image.bb then
@@ -1962,7 +2073,7 @@ function TextBoxWidget:onHoldReleaseText(callback, ges)
                     local ImageViewer = require("ui/widget/imageviewer")
                     local imgviewer = ImageViewer:new{
                         image = image.hi_bb or image.bb, -- fallback to low-res if high-res failed
-                        image_disposable = false, -- we may re-use our bb if called again
+                        image_disposable = false, -- we may reuse our bb if called again
                         with_title_bar = true,
                         title_text = image.title,
                         caption = image.caption,
@@ -1979,86 +2090,30 @@ function TextBoxWidget:onHoldReleaseText(callback, ges)
             end
         end
     end
-    -- Swap start and end if needed
-    local x0, y0, x1, y1
-    -- first, sort by y/line_num
-    local start_line_num = math.ceil(self.hold_start_y / self.line_height_px)
-    local end_line_num = math.ceil(hold_end_y / self.line_height_px)
-    if start_line_num < end_line_num then
-        x0, y0 = self.hold_start_x, self.hold_start_y
-        x1, y1 = hold_end_x, hold_end_y
-    elseif start_line_num > end_line_num then
-        x0, y0 = hold_end_x, hold_end_y
-        x1, y1 = self.hold_start_x, self.hold_start_y
-    else -- same line_num : sort by x
-        if self.hold_start_x <= hold_end_x then
-            x0, y0 = self.hold_start_x, self.hold_start_y
-            x1, y1 = hold_end_x, hold_end_y
-        else
-            x0, y0 = hold_end_x, hold_end_y
-            x1, y1 = self.hold_start_x, self.hold_start_y
-        end
-    end
 
     -- Reset start infos, so we do not reuse them and can catch
     -- a missed start event
-    self.hold_start_x = nil
-    self.hold_start_y = nil
+    self.hold_start_pos = nil
+    self.hold_end_pos = nil
     self.hold_start_time = nil
 
-    if self.use_xtext then
-        -- With xtext and fribidi, words may not be laid out in logical order,
-        -- so the left of a visual word may be its end in logical order,
-        -- and the right its start.
-        -- So, just find out charpos (text indice) of both points and
-        -- find word edges in the logical order text/charlist.
-        local sel_start_idx = self:getCharPosAtXY(x0, y0)
-        local sel_end_idx = self:getCharPosAtXY(x1, y1)
-        if not sel_start_idx or not sel_end_idx then
-            -- one or both hold points were out of text
-            return true
-        end
-        if sel_start_idx > sel_end_idx then -- re-order if needed
-            sel_start_idx, sel_end_idx = sel_end_idx, sel_start_idx
-        end
-        -- We get cursor positions, which can be after last char,
-        -- and that we need to correct. But if both positions are
-        -- after last char, the full selection is out of text.
-        if sel_start_idx > #self._xtext then -- Both are after last char
-            return true
-        end
-        if sel_end_idx > #self._xtext then -- Only end is after last char
-            sel_end_idx = #self._xtext
-        end
-        -- Delegate word boundaries search to xtext.cpp, which can
-        -- use libunibreak's wordbreak features.
-        -- (50 is the nb of chars backward and ahead of selection indices
-        -- to consider when looking for word boundaries)
-        local selected_text = self._xtext:getSelectedWords(sel_start_idx, sel_end_idx, 50)
-
-        logger.dbg("onHoldReleaseText (duration:", time.format_time(hold_duration), ") :",
-                        sel_start_idx, ">", sel_end_idx, "=", selected_text)
-        -- We give index in the charlist (unicode chars), and provide a function
-        -- to convert these indices as in the utf8 text, to be used by caller
-        -- only if needed, as it may be expensive.
-        callback(selected_text, hold_duration, sel_start_idx, sel_end_idx, function(idx) return self:getSourceIndex(idx) end)
-        return true
+    if self.highlight_start_idx == nil then
+        return false
     end
 
-    -- Only when not self.use_xtext:
-
-    -- similar code to find start or end is in _findWordEdge() helper
-    local sel_start_idx = self:_findWordEdge(x0, y0, FIND_START)
-    local sel_end_idx = self:_findWordEdge(x1, y1, FIND_END)
-
-    if not sel_start_idx or not sel_end_idx then
-        -- one or both hold points were out of text
-        return true
+    local selected_text
+    if self._xtext then
+        selected_text = self._xtext:getText(self.highlight_start_idx, self.highlight_end_idx)
+    else
+        selected_text = table.concat(self.charlist, "", self.highlight_start_idx, self.highlight_end_idx)
     end
 
-    local selected_text = table.concat(self.charlist, "", sel_start_idx, sel_end_idx)
-    logger.dbg("onHoldReleaseText (duration:", time.format_time(hold_duration), ") :", sel_start_idx, ">", sel_end_idx, "=", selected_text)
-    callback(selected_text, hold_duration, sel_start_idx, sel_end_idx, function(idx) return self:getSourceIndex(idx) end)
+    logger.dbg("onHoldReleaseText (duration:", time.format_time(hold_duration), ") :",
+                        self.highlight_start_idx, ">", self.highlight_end_idx, "=", selected_text)
+    -- We give index in the charlist (unicode chars), and provide a function
+    -- to convert these indices as in the utf8 text, to be used by caller
+    -- only if needed, as it may be expensive.
+    callback(selected_text, hold_duration, self.highlight_start_idx, self.highlight_end_idx, function(idx) return self:getSourceIndex(idx) end)
     return true
 end
 
@@ -2121,6 +2176,218 @@ function TextBoxWidget:getSourceIndex(char_idx)
     else
         local utf8 = table.concat(self.charlist, "", 1, char_idx)
         return #utf8
+    end
+end
+
+function TextBoxWidget:getXtextHighlightIndices(start_x, start_y, end_x, end_y)
+    -- With xtext and fribidi, words may not be laid out in logical order,
+    -- so the left of a visual word may be its end in logical order,
+    -- and the right its start.
+    -- So, just find out charpos (text indice) of both points and
+    -- find word edges in the logical order text/charlist.
+    local sel_start_idx = self:getCharPosAtXY(start_x, start_y)
+    local sel_end_idx = self:getCharPosAtXY(end_x, end_y)
+    if not sel_start_idx or not sel_end_idx then
+        -- one or both hold points were out of text
+        return nil, nil
+    end
+    if sel_start_idx > sel_end_idx then -- re-order if needed
+        sel_start_idx, sel_end_idx = sel_end_idx, sel_start_idx
+    end
+    -- We get cursor positions, which can be after last char,
+    -- and that we need to correct. But if both positions are
+    -- after last char, the full selection is out of text.
+    if sel_start_idx > #self._xtext then -- Both are after last char
+        return nil, nil
+    end
+    if sel_end_idx > #self._xtext then -- Only end is after last char
+        sel_end_idx = #self._xtext
+    end
+
+    -- Delegate word boundaries search to xtext.cpp, which can
+    -- use libunibreak's wordbreak features.
+    -- (50 is the nb of chars backward and ahead of selection indices
+    -- to consider when looking for word boundaries)
+    local word_start_idx, word_end_idx = self._xtext:getSelectedWordIndices(sel_start_idx, sel_end_idx, 50)
+    return word_start_idx, word_end_idx
+end
+
+function TextBoxWidget:getXtextHighlightRects(text_start_idx, text_end_idx, start_line_num, end_line_num)
+    local rects = {}
+    for line_num = start_line_num, end_line_num, 1 do
+        local line = self.vertical_string_list[line_num]
+        if line.xglyphs then -- non-empty line
+            local line_last_rect = nil
+            for _, xglyph in ipairs(line.xglyphs) do
+                if xglyph.text_index >= text_start_idx and xglyph.text_index <= text_end_idx and not xglyph.no_drawing then
+                    if line_last_rect == nil then
+                        local rect = Geom:new{
+                            x = xglyph.x0,
+                            y = (line_num - self.virtual_line_num) * self.line_height_px,
+                            w = xglyph.x1 - xglyph.x0,
+                            h = self.line_height_px,
+                        }
+                        table.insert(rects, rect)
+                        line_last_rect = rect
+                    else
+                        line_last_rect.w = xglyph.x1 - line_last_rect.x
+                    end
+                end
+            end
+        end
+    end
+    return rects
+end
+
+function TextBoxWidget:getNonXtextHighlightIndices(start_x, start_y, end_x, end_y)
+    local start_idx = self:_findWordEdge(start_x, start_y, FIND_START)
+    local end_idx = self:_findWordEdge(end_x, end_y, FIND_END)
+    if not start_idx or not end_idx then
+        -- one or both hold points were out of text
+        return nil, nil
+    end
+    return start_idx, end_idx
+end
+
+function TextBoxWidget:getNonXtextHighlightRects(text_start_idx, text_end_idx, start_line_num, end_line_num)
+    local rects = {}
+    for line_num = start_line_num, end_line_num, 1 do
+        local line = self.vertical_string_list[line_num]
+        if line.end_offset then
+            local line_last_rect = nil
+            local x = 0
+            for text_index = line.offset, line.end_offset, 1 do
+                local width = self.char_width[self.charlist[text_index]] + (self.idx_pad[text_index] or 0)
+                if text_index >= text_start_idx and text_index <= text_end_idx then
+                    if line_last_rect == nil then
+                        local rect = Geom:new{
+                            x = x,
+                            y = (line_num - self.virtual_line_num) * self.line_height_px,
+                            w = width,
+                            h = self.line_height_px,
+                        }
+                        table.insert(rects, rect)
+                        line_last_rect = rect
+                    else
+                        line_last_rect.w = (x + width) - line_last_rect.x
+                    end
+                end
+                x = x + width
+            end
+        end
+    end
+    return rects
+end
+
+-- Returns true if the highlight has changed.
+function TextBoxWidget:clearHighlight()
+    self.hold_start_pos = nil
+    self.hold_end_pos = nil
+    return self:updateHighlight()
+end
+
+-- Returns true if the highlight has changed.
+function TextBoxWidget:updateHighlight()
+    if not self.hold_start_pos or not self.hold_end_pos then
+        local changed = self.highlight_start_idx ~= nil or self.highlight_end_idx ~= nil
+        self.highlight_start_idx = nil
+        self.highlight_end_idx = nil
+        self.highlight_start_line = nil
+        self.highlight_end_line = nil
+        self.highlight_rects = nil
+        return changed
+    end
+
+    -- Swap start and end if needed
+    local x0, y0, x1, y1
+    -- first, sort by y/line_num
+    local start_line_num = math.ceil(self.hold_start_pos.y / self.line_height_px) + self.virtual_line_num - 1
+    local end_line_num = math.ceil(self.hold_end_pos.y / self.line_height_px) + self.virtual_line_num - 1
+    if start_line_num < end_line_num then
+        x0, y0 = self.hold_start_pos.x, self.hold_start_pos.y
+        x1, y1 = self.hold_end_pos.x, self.hold_end_pos.y
+    elseif start_line_num > end_line_num then
+        start_line_num, end_line_num = end_line_num, start_line_num
+        x0, y0 = self.hold_end_pos.x, self.hold_end_pos.y
+        x1, y1 = self.hold_start_pos.x, self.hold_start_pos.y
+    else -- same line_num : sort by x
+        if self.hold_start_pos.x <= self.hold_end_pos.x then
+            x0, y0 = self.hold_start_pos.x, self.hold_start_pos.y
+            x1, y1 = self.hold_end_pos.x, self.hold_end_pos.y
+        else
+            x0, y0 = self.hold_end_pos.x, self.hold_end_pos.y
+            x1, y1 = self.hold_start_pos.x, self.hold_start_pos.y
+        end
+    end
+
+    local text_start_idx, text_end_idx
+    if self.use_xtext then
+        text_start_idx, text_end_idx = self:getXtextHighlightIndices(x0, y0, x1, y1)
+    else
+        text_start_idx, text_end_idx = self:getNonXtextHighlightIndices(x0, y0, x1, y1)
+    end
+
+    if start_line_num < 1 then
+        start_line_num = 1
+    end
+    if start_line_num > #self.vertical_string_list then
+        start_line_num = #self.vertical_string_list
+    end
+    if end_line_num < 1 then
+        end_line_num = 1
+    end
+    if end_line_num > #self.vertical_string_list then
+        end_line_num = #self.vertical_string_list
+    end
+
+    -- Has the highlight range changed?
+    if text_start_idx == self.highlight_start_idx and text_end_idx == self.highlight_end_idx
+      and start_line_num == self.highlight_start_line and end_line_num == self.highlight_end_line then
+        return false
+    end
+
+    -- The range has changed, get the rectangles for drawing.
+    self.highlight_start_idx = text_start_idx
+    self.highlight_end_idx = text_end_idx
+    self.highlight_start_line = start_line_num
+    self.highlight_end_line = end_line_num
+    if text_start_idx == nil or not self.highlight_text_selection then
+        self.highlight_rects = nil
+    elseif self.use_xtext then
+        self.highlight_rects = self:getXtextHighlightRects(text_start_idx, text_end_idx, start_line_num, end_line_num)
+    else
+        self.highlight_rects = self:getNonXtextHighlightRects(text_start_idx, text_end_idx, start_line_num, end_line_num)
+    end
+    return true
+end
+
+function TextBoxWidget:redrawHighlight()
+    if self.highlight_text_selection then
+        self:_updateLayout(false)
+        UIManager:setDirty(self.dialog or "all", function()
+            return "ui", self.dimen
+        end)
+    end
+end
+
+function TextBoxWidget:scheduleClearHighlightAndRedraw()
+    if self.highlight_clear_and_redraw_action then
+        return
+    end
+
+    self.highlight_clear_and_redraw_action = function ()
+        self.highlight_clear_and_redraw_action = nil
+        if self:clearHighlight() then
+            self:redrawHighlight()
+        end
+    end
+    UIManager:scheduleIn(0.5, self.highlight_clear_and_redraw_action)
+end
+
+function TextBoxWidget:unscheduleClearHighlightAndRedraw()
+    if self.highlight_clear_and_redraw_action then
+        UIManager:unschedule(self.highlight_clear_and_redraw_action)
+        self.highlight_clear_and_redraw_action = nil
     end
 end
 

@@ -9,7 +9,6 @@ local GestureDetector = require("device/gesturedetector")
 local Key = require("device/key")
 local UIManager
 local framebuffer = require("ffi/framebuffer")
-local input = require("ffi/input")
 local logger = require("logger")
 local time = require("ui/time")
 local _ = require("gettext")
@@ -139,23 +138,19 @@ local Input = {
             "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
             "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
             "Up", "Down", "Left", "Right", "Press", "Backspace", "End",
-            "Back", "Sym", "AA", "Menu", "Home", "Del",
+            "Back", "Sym", "AA", "Menu", "Home", "Del", "ScreenKB",
             "LPgBack", "RPgBack", "LPgFwd", "RPgFwd"
         },
     },
 
     fake_event_set = {
-        IntoSS = true, OutOfSS = true,
+        IntoSS = true, OutOfSS = true, ExitingSS = true,
         UsbPlugIn = true, UsbPlugOut = true,
         Charging = true, NotCharging = true,
         WakeupFromSuspend = true, ReadyToSuspend = true,
         UsbDevicePlugIn = true, UsbDevicePlugOut = true,
     },
-    -- Subset of fake_event_set for events that require passing a parameter along
-    complex_fake_event_set = {
-        UsbDevicePlugIn = true, UsbDevicePlugOut = true,
-    },
-    -- Crappy FIFO to forward parameters for those events to UIManager
+    -- Crappy FIFO to forward parameters to UIManager for the subset of fake_event_set that require passing a parameter along
     fake_event_args = {
         UsbDevicePlugIn = {},
         UsbDevicePlugOut = {},
@@ -175,6 +170,7 @@ local Input = {
         Shift = false,
         Sym = false,
         Meta = false,
+        ScreenKB = false,
     },
 
     -- repeat state:
@@ -182,13 +178,14 @@ local Input = {
 
     -- touch state:
     main_finger_slot = 0,
+    pen_slot = 4,
     cur_slot = 0,
     MTSlots = nil, -- table, object may be replaced at runtime
     active_slots = nil, -- ditto
     ev_slots = nil, -- table
     gesture_detector = nil,
 
-    -- simple internal clipboard implementation, can be overidden to use system clipboard
+    -- simple internal clipboard implementation, can be overridden to use system clipboard
     hasClipboardText = function()
         return _internal_clipboard_text ~= ""
     end,
@@ -198,6 +195,10 @@ local Input = {
     setClipboardText = function(text)
         _internal_clipboard_text = text or ""
     end,
+
+    -- open'ed input devices hashmap (key: path, value: fd number)
+    -- Must be a class member, both because Input is a singleton and that state is process-wide anyway.
+    opened_devices = {},
 }
 
 function Input:new(o)
@@ -209,6 +210,31 @@ function Input:new(o)
 end
 
 function Input:init()
+    -- Setup underlying input implementation.
+    if self.input then -- luacheck: ignore 542
+        -- Already setup (e.g. stubbed by the testsuite).
+    elseif self.device:isSDL() then
+        self.input = require("ffi/input_SDL2_0")
+        self.hasClipboardText = function()
+            return self.input.hasClipboardText()
+        end
+        self.getClipboardText = function()
+            return self.input.getClipboardText()
+        end
+        self.setClipboardText = function(text)
+            return self.input.setClipboardText(text)
+        end
+        self.gameControllerRumble = function(left_intensity, right_intensity, duration)
+            return self.input.gameControllerRumble(left_intensity, right_intensity, duration)
+        end
+    elseif self.device:isAndroid() then
+        self.input = require("ffi/input_android")
+    elseif self.device:isPocketBook() then
+        self.input = require("ffi/input_pocketbook")
+    else
+        self.input = require("libs/libkoreader-input")
+    end
+
     -- Initialize instance-specific tables
     -- NOTE: All of these arrays may be destroyed & recreated at runtime, so we don't want a parent/class object for those.
     self.timer_callbacks = {}
@@ -222,6 +248,10 @@ function Input:init()
             slot = self.main_finger_slot,
         },
     }
+
+    -- Always send pen data to a slot far enough away from our main finger slot that it can never be matched with a finger buddy in GestureDetector (i.e., +/- 1),
+    -- with an extra bit of leeway, since we don't even actually support three finger gestures ;).
+    self.pen_slot = self.main_finger_slot + 4
 
     self.gesture_detector = GestureDetector:new{
         screen = self.device.screen,
@@ -246,8 +276,9 @@ function Input:init()
     end
 
     -- set up fake event map
-    self.event_map[10000] = "IntoSS" -- go into screen saver
-    self.event_map[10001] = "OutOfSS" -- go out of screen saver
+    self.event_map[10000] = "IntoSS" -- Requested to go into screen saver
+    self.event_map[10001] = "OutOfSS" -- Requested to go out of screen saver
+    self.event_map[10002] = "ExitingSS" -- Specific to Kindle, SS *actually* closed
     self.event_map[10010] = "UsbPlugIn"
     self.event_map[10011] = "UsbPlugOut"
     self.event_map[10020] = "Charging"
@@ -293,14 +324,89 @@ function Input:disableRotationMap()
 end
 
 --[[--
-Wrapper for FFI input open.
+Wrapper for our Lua/C input module's open.
 
 Note that we adhere to the "." syntax here for compatibility.
 
-@todo Clean up separation FFI/this.
+The `name` argument is optional, and used for logging purposes only.
 --]]
-function Input.open(device, is_emu_events)
-    return input.open(device, is_emu_events and 1 or 0)
+function Input:open(path, name)
+    if self.input.is_ffi then
+        return self.input.open(path, name)
+    end
+    -- Make sure we don't open the same device twice.
+    if not Input.opened_devices[path] then
+        local fd = self.input.open(path)
+        if fd then
+            Input.opened_devices[path] = fd
+            if name then
+                logger.dbg("Opened fd", fd, "for input device", name, "@", path)
+            else
+                logger.dbg("Opened fd", fd, "for input device @", path)
+            end
+        end
+        -- No need to log failures, input will have raised an error already,
+        -- and we want to make those fatal, so we don't protect this call.
+        return fd
+    end
+end
+
+--[[--
+Wrapper for our Lua/C input module's fdopen.
+
+Note that we adhere to the "." syntax here for compatibility.
+
+The `name` argument is optional, and used for logging purposes only.
+`path` is mandatory, though!
+--]]
+function Input:fdopen(fd, path, name)
+    -- Make sure we don't open the same device twice.
+    if not Input.opened_devices[path] then
+        self.input.fdopen(fd)
+        -- As with input.open, it will throw on error (closing the fd first)
+        Input.opened_devices[path] = fd
+        if name then
+            logger.dbg("Kept fd", fd, "open for input device", name, "@", path)
+        else
+            logger.dbg("Kept fd", fd, "open for input device @", path)
+        end
+        return fd
+    end
+end
+
+--[[--
+Wrapper for our Lua/C input module's close.
+
+Note that we adhere to the "." syntax here for compatibility.
+--]]
+function Input:close(path)
+    if self.input.is_ffi then
+        return self.input.close(path)
+    end
+    -- Make sure we actually know about this device
+    local fd = Input.opened_devices[path]
+    if fd then
+        local ok, err = self.input.close(fd)
+        if ok or err == C.ENODEV then
+            -- Either the call succeeded,
+            -- or the backend had already caught an ENODEV in waitForInput and closed the fd internally.
+            -- (Because the EvdevInputRemove Event comes from an UsbDevicePlugOut uevent forwarded as an... *input* EV_KEY event ;)).
+            -- Regardless, that device is gone, so clear its spot in the hashmap.
+            Input.opened_devices[path] = nil
+        end
+    else
+        logger.warn("Tried to close an unknown input device @", path)
+    end
+end
+
+--[[--
+Wrapper for our Lua/C input module's closeAll.
+
+Note that we adhere to the "." syntax here for compatibility.
+--]]
+function Input:teardown()
+    self.input.closeAll()
+    Input.opened_devices = {}
 end
 
 --[[--
@@ -446,7 +552,7 @@ function Input:setTimeout(slot, ges, cb, origin, delay)
 
     -- If we're on a platform with the timerfd backend, handle that
     local timerfd
-    if input.setTimer then
+    if self.input.setTimer then
         -- If GestureDetector's clock source probing was inconclusive, do this on the UI timescale instead.
         if clock_id == -1 then
             deadline = time.now() + delay
@@ -458,7 +564,7 @@ function Input:setTimeout(slot, ges, cb, origin, delay)
         -- instead of ensuring that ourselves via a polling timeout.
         -- This ensures perfect accuracy, and allows it to be computed in the event's own timescale.
         local sec, usec = time.split_s_us(deadline)
-        timerfd = input.setTimer(clock_id, sec, usec)
+        timerfd = self.input.setTimer(clock_id, sec, usec)
     end
     if timerfd then
             -- It worked, tweak the table a bit to make it clear the deadline will be handled by the kernel
@@ -492,7 +598,7 @@ function Input:clearTimeout(slot, ges)
         if item.slot == slot and (not ges or item.gesture == ges) then
             -- If the timerfd backend is in use, close the fd and free the list's node, too.
             if item.timerfd then
-                input.clearTimer(item.timerfd)
+                self.input.clearTimer(item.timerfd)
             end
             table.remove(self.timer_callbacks, i)
         end
@@ -501,10 +607,10 @@ end
 
 function Input:clearTimeouts()
     -- If the timerfd backend is in use, close the fds, too
-    if input.setTimer then
+    if self.input.setTimer then
         for _, item in ipairs(self.timer_callbacks) do
             if item.timerfd then
-                input.clearTimer(item.timerfd)
+                self.input.clearTimer(item.timerfd)
             end
         end
     end
@@ -532,15 +638,17 @@ function Input:resetState()
 end
 
 function Input:handleKeyBoardEv(ev)
-    -- Detect loss of contact for the "snow" protocol...
-    -- NOTE: Some ST devices may also behave similarly, but we handle those via ABS_PRESSURE
+    -- Detect loss of contact for the "snow" protocol, as we *never* get EV_ABS:ABS_MT_TRACKING_ID:-1 on those...
+    -- NOTE: The same logic *could* be used on *some* ST devices to detect contact states,
+    --       but we instead prefer using EV_ABS:ABS_PRESSURE on those,
+    --       as it appears to be more common than EV_KEY:BTN_TOUCH on the devices we care about...
     if self.snow_protocol then
         if ev.code == C.BTN_TOUCH then
             if ev.value == 0 then
                 -- Kernel sends it after loss of contact for *all* slots,
                 -- only once the final contact point has been lifted.
                 if #self.MTSlots == 0 then
-                    -- Likely, since this is usually in its own event stream,
+                    -- Likely, since this is usually in its own input frame,
                     -- meaning self.MTSlots has *just* been cleared by our last EV_SYN:SYN_REPORT handler...
                     -- So, poke at the actual data to find the slots that are currently active (i.e., in the down state),
                     -- and re-populate a minimal self.MTSlots array that simply switches them to the up state ;).
@@ -553,7 +661,7 @@ function Input:handleKeyBoardEv(ev)
                 else
                     -- Unlikely, given what we mentioned above...
                     -- Note that, funnily enough, its EV_KEY:BTN_TOUCH:1 counterpart
-                    -- *can* be in the same initial event stream as the EV_ABS batch...
+                    -- *can* be in the same initial input frame as the EV_ABS batch...
                     for _, MTSlot in ipairs(self.MTSlots) do
                         self:setMtSlot(MTSlot.slot, "id", -1)
                     end
@@ -564,24 +672,30 @@ function Input:handleKeyBoardEv(ev)
         end
     elseif self.wacom_protocol then
         if ev.code == C.BTN_TOOL_PEN then
-            -- Always send pen data to slot 2
-            self:setupSlotData(2)
+            -- Switch to the dedicated pen slot, and make sure it's active, as this can come in a dedicated input frame
+            self:setupSlotData(self.pen_slot)
             if ev.value == 1 then
                 self:setCurrentMtSlot("tool", TOOL_TYPE_PEN)
             else
                 self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
+                -- Switch back to our main finger slot
+                self.cur_slot = self.main_finger_slot
             end
 
             return
         elseif ev.code == C.BTN_TOUCH then
             -- BTN_TOUCH is bracketed by BTN_TOOL_PEN, so we can limit this to pens, to avoid stomping on panel slots.
             if self:getCurrentMtSlotData("tool") == TOOL_TYPE_PEN then
+                -- Make sure the pen slot is active, as this can come in a dedicated input frame
+                -- (i.e., we need it to be referenced by self.MTSlots for the lift to be picked up in the EV_SYN:SYN_REPORT handler).
+                -- (Conversely, getCurrentMtSlotData pokes at the *persistent* slot data in self.ev_slots,
+                -- so it can keep track of data across input frames).
+                self:setupSlotData(self.pen_slot)
                 -- Much like on snow, use this to detect contact down & lift,
                 -- as ABS_PRESSURE may be entirely omitted from hover events,
                 -- and ABS_DISTANCE is not very clear cut...
-                self:setupSlotData(2)
                 if ev.value == 1 then
-                    self:setCurrentMtSlot("id", 2)
+                    self:setCurrentMtSlot("id", self.pen_slot)
                 else
                     self:setCurrentMtSlot("id", -1)
                 end
@@ -616,7 +730,7 @@ function Input:handleKeyBoardEv(ev)
         -- So, we simply store it somewhere our handler can find and call it a day.
         -- And we use an array as a FIFO because we cannot guarantee that insertions and removals will interleave nicely.
         -- (This is all in the name of avoiding complexifying the common codepaths for events that should be few and far between).
-        if self.complex_fake_event_set[keycode] then
+        if self.fake_event_args[keycode] then
             table.insert(self.fake_event_args[keycode], ev.value)
         end
         return keycode
@@ -706,6 +820,9 @@ function Input:handlePowerManagementOnlyEv(ev)
     end
 
     if self.fake_event_set[keycode] then
+        if self.fake_event_args[keycode] then
+            table.insert(self.fake_event_args[keycode], ev.value)
+        end
         return keycode
     end
 
@@ -717,6 +834,16 @@ function Input:handlePowerManagementOnlyEv(ev)
         elseif ev.value == KEY_RELEASE then
             return "PowerRelease"
         end
+    end
+
+    -- Make sure we don't leave modifiers in an inconsistent state
+    if self.modifiers[keycode] ~= nil then
+        if ev.value == KEY_PRESS then
+            self.modifiers[keycode] = true
+        elseif ev.value == KEY_RELEASE then
+            self.modifiers[keycode] = false
+        end
+        return
     end
 
     -- Nothing to see, move along!
@@ -787,19 +914,7 @@ function Input:handleTouchEv(ev)
         if ev.code == C.ABS_MT_SLOT then
             self:setupSlotData(ev.value)
         elseif ev.code == C.ABS_MT_TRACKING_ID then
-            if self.snow_protocol then
-                -- NOTE: We'll never get an ABS_MT_SLOT event, instead we have a slot-like ABS_MT_TRACKING_ID value...
-                --       This also means this may never be set to -1 on contact lift,
-                --       which is why we instead rely on EV_KEY:BTN_TOUCH:0 for that (c.f., handleKeyBoardEv).
-                self:setupSlotData(ev.value)
-            else
-                -- The Elan driver needlessly repeats unchanged ABS_MT_TRACKING_ID values,
-                -- which allows us to do this here instead of relying more aggressively on setCurrentMtSlotChecked.
-                if #self.MTSlots == 0 then
-                    self:addSlot(self.cur_slot)
-                end
-            end
-            self:setCurrentMtSlot("id", ev.value)
+            self:setCurrentMtSlotChecked("id", ev.value)
         elseif ev.code == C.ABS_MT_TOOL_TYPE then
             -- NOTE: On the Elipsa: Finger == 0; Pen == 1
             self:setCurrentMtSlot("tool", ev.value)
@@ -872,8 +987,73 @@ function Input:handleMixedTouchEv(ev)
     end
 end
 
+-- Slightly mangled variant of handleTouchEv to deal with the various quirks of the so-called "snow" protocol over the years...
+function Input:handleTouchEvSnow(ev)
+    if ev.type == C.EV_ABS then
+        -- NOTE: Ideally, an input frame starts with either ABS_MT_SLOT or ABS_MT_TRACKING_ID,
+        --       but they *both* may be omitted if the last contact point just moved without lift.
+        --       The use of setCurrentMtSlotChecked instead of setCurrentMtSlot ensures
+        --       we actually setup the slot data storage and/or reference for the current slot in this case,
+        --       as the reference list is empty at the beginning of an input frame (c.f., Input:newFrame).
+        --       The most common platforms where you'll see this happen are:
+        --       * PocketBook, because of our InkView EVT_POINTERMOVE translation
+        --         (c.f., translateEvent @ ffi/input_pocketbook.lua).
+        --       * SDL, because of our SDL_MOUSEMOTION/SDL_FINGERMOTION translation
+        --         (c.f., waitForEvent @ ffi/SDL2_0.lua).
+        if ev.code == C.ABS_MT_SLOT then
+            self:setupSlotData(ev.value)
+        elseif ev.code == C.ABS_MT_TRACKING_ID then
+            -- NOTE: We'll never get an ABS_MT_SLOT event, instead we have a slot-like ABS_MT_TRACKING_ID value...
+            --       This also means that, unlike on sane devices, this will *never* be set to -1 on contact lift,
+            --       which is why we instead have to rely on EV_KEY:BTN_TOUCH:0 for that (c.f., handleKeyBoardEv).
+            if ev.value == -1 then
+                -- NOTE: While *actual* snow_protocol devices will *never* emit an EV_ABS:ABS_MT_TRACKING_ID:-1 event,
+                --       we've seen brand new revisions of snow_protocol devices shipping with sane panels instead,
+                --       so we'll need to disable the quirks at runtime to handle these properly...
+                --       (c.f., https://www.mobileread.com/forums/showpost.php?p=4383629&postcount=997).
+                -- NOTE: Simply skipping the slot storage setup for -1 would not be enough, as it would only fix ST handling.
+                --       MT would be broken, because buddy contact detection in GestureDetector looks at slot +/- 1,
+                --       whereas we'd be having the main contact point at a stupidly large slot number
+                --       (because it would match ABS_MT_TRACKING_ID, given the lack of ABS_MT_SLOT, at least for the first input frame),
+                --       while the second contact would be at slot 1, because it would immediately have required emitting a proper ABS_MT_SLOT event...
+                logger.warn("Input: Disabled snow_protocol quirks because your device's hardware revision doesn't appear to need them!")
+                self.snow_protocol = false
+                self.handleTouchEv = Input.handleTouchEv
+            else
+                self:setupSlotData(ev.value)
+            end
+            self:setCurrentMtSlotChecked("id", ev.value)
+        elseif ev.code == C.ABS_MT_TOOL_TYPE then
+            -- NOTE: On the Elipsa: Finger == 0; Pen == 1
+            self:setCurrentMtSlot("tool", ev.value)
+        -- NOTE: We ignore ABS_X & ABS_Y, as they may be reported for *multiple* contacts on the BTN_TOUCH:0 frame...
+        --       ...without a corresponding ABS_MT_SLOT or ABS_MT_TRACKING_ID, of course... (#11910)
+        elseif ev.code == C.ABS_MT_POSITION_X then
+            self:setCurrentMtSlotChecked("x", ev.value)
+        elseif ev.code == C.ABS_MT_POSITION_Y then
+            self:setCurrentMtSlotChecked("y", ev.value)
+        -- NOTE: Similarly, we can't honor ABS_PRESSURE for the same reason as ABS_X & ABS_Y...
+        end
+    elseif ev.type == C.EV_SYN then
+        if ev.code == C.SYN_REPORT then
+            for _, MTSlot in ipairs(self.MTSlots) do
+                self:setMtSlot(MTSlot.slot, "timev", time.timeval(ev.time))
+            end
+            -- feed ev in all slots to state machine
+            local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
+            self:newFrame()
+            local ges_evs = {}
+            for _, touch_ges in ipairs(touch_gestures) do
+                self:gestureAdjustHook(touch_ges)
+                table.insert(ges_evs, Event:new("Gesture", self.gesture_detector:adjustGesCoordinate(touch_ges)))
+            end
+            return ges_evs
+        end
+    end
+end
+
 function Input:handleTouchEvPhoenix(ev)
-    -- Hack on handleTouchEV for the Kobo Aura
+    -- Hack on handleTouchEv for the Kobo Aura
     -- It seems to be using a custom protocol:
     --        finger 0 down:
     --            input_report_abs(elan_touch_data.input, C.ABS_MT_TRACKING_ID, 0);
@@ -934,14 +1114,15 @@ end
 
 function Input:handleTouchEvLegacy(ev)
     -- Single Touch Protocol.
-    -- Some devices emit both singletouch and multitouch events,
-    -- on those devices, the 'handleTouchEv' function may not behave as expected. Use this one instead.
+    -- Some devices emit both singletouch and multitouch events.
+    -- On those devices, `handleTouchEv` may not behave as expected. Use this one instead.
     if ev.type == C.EV_ABS then
         if ev.code == C.ABS_X then
             self:setCurrentMtSlotChecked("x", ev.value)
         elseif ev.code == C.ABS_Y then
             self:setCurrentMtSlotChecked("y", ev.value)
         elseif ev.code == C.ABS_PRESSURE then
+            -- This is the least common denominator we can use to detect contact down & lift...
             if ev.value ~= 0 then
                 self:setCurrentMtSlotChecked("id", 1)
             else
@@ -984,39 +1165,37 @@ end
 --- (Translation should be done via registerEventAdjustHook in Device implementations).
 --- This needs to be called *via handleGyroEv* in a handleMiscEv implementation (c.f., Kobo, Kindle or PocketBook).
 function Input:handleMiscGyroEv(ev)
-    local rotation_mode, screen_mode
+    local rotation
     if ev.value == C.DEVICE_ROTATED_UPRIGHT then
         -- i.e., UR
-        rotation_mode = framebuffer.DEVICE_ROTATED_UPRIGHT
-        screen_mode = "portrait"
+        rotation = framebuffer.DEVICE_ROTATED_UPRIGHT
     elseif ev.value == C.DEVICE_ROTATED_CLOCKWISE then
         -- i.e., CW
-        rotation_mode = framebuffer.DEVICE_ROTATED_CLOCKWISE
-        screen_mode = "landscape"
+        rotation = framebuffer.DEVICE_ROTATED_CLOCKWISE
     elseif ev.value == C.DEVICE_ROTATED_UPSIDE_DOWN then
         -- i.e., UD
-        rotation_mode = framebuffer.DEVICE_ROTATED_UPSIDE_DOWN
-        screen_mode = "portrait"
+        rotation = framebuffer.DEVICE_ROTATED_UPSIDE_DOWN
     elseif ev.value == C.DEVICE_ROTATED_COUNTER_CLOCKWISE then
         -- i.e., CCW
-        rotation_mode = framebuffer.DEVICE_ROTATED_COUNTER_CLOCKWISE
-        screen_mode = "landscape"
+        rotation = framebuffer.DEVICE_ROTATED_COUNTER_CLOCKWISE
     else
         -- Discard FRONT/BACK
         return
     end
 
-    local old_rotation_mode = self.device.screen:getRotationMode()
+    local old_rotation = self.device.screen:getRotationMode()
     if self.device:isGSensorLocked() then
-        local old_screen_mode = self.device.screen:getScreenMode()
-        if rotation_mode and rotation_mode ~= old_rotation_mode and screen_mode == old_screen_mode then
+        local matching_orientation = bit.band(rotation, 1) == bit.band(old_rotation, 1)
+        if rotation and rotation ~= old_rotation and matching_orientation then
             -- Cheaper than a full SetRotationMode event, as we don't need to re-layout anything.
-            self.device.screen:setRotationMode(rotation_mode)
+            self.device.screen:setRotationMode(rotation)
             UIManager:onRotation()
         end
     else
-        if rotation_mode and rotation_mode ~= old_rotation_mode then
-            return Event:new("SetRotationMode", rotation_mode)
+        if rotation and rotation ~= old_rotation then
+            -- NOTE: We do *NOT* send a broadcast manually, and instead rely on the main loop's sendEvent:
+            --       this ensures that only widgets that actually know how to handle a rotation will do so ;).
+            return Event:new("SetRotationMode", rotation)
         end
     end
 end
@@ -1053,29 +1232,29 @@ function Input:initMtSlot(slot)
     end
 end
 
-function Input:setMtSlot(slot, key, val)
-    self.ev_slots[slot][key] = val
-end
-
-function Input:setCurrentMtSlot(key, val)
-    self:setMtSlot(self.cur_slot, key, val)
-end
-
--- Same as above, but ensures the current slot actually has a live ref first
-function Input:setCurrentMtSlotChecked(key, val)
-    if #self.MTSlots == 0 then
-        self:addSlot(self.cur_slot)
-    end
-
-    self:setMtSlot(self.cur_slot, key, val)
-end
-
 function Input:getMtSlot(slot)
     return self.ev_slots[slot]
 end
 
 function Input:getCurrentMtSlot()
-    return self:getMtSlot(self.cur_slot)
+    return self.ev_slots[self.cur_slot]
+end
+
+function Input:setMtSlot(slot, key, val)
+    self.ev_slots[slot][key] = val
+end
+
+function Input:setCurrentMtSlot(key, val)
+    self.ev_slots[self.cur_slot][key] = val
+end
+
+-- Same as above, but ensures the current slot actually has a live ref first
+function Input:setCurrentMtSlotChecked(key, val)
+    if not self.active_slots[self.cur_slot] then
+        self:addSlot(self.cur_slot)
+    end
+
+    self.ev_slots[self.cur_slot][key] = val
 end
 
 function Input:getCurrentMtSlotData(key)
@@ -1102,22 +1281,13 @@ function Input:addSlot(value)
     self.cur_slot = value
 end
 
-function Input:addSlotIfChanged(value)
-    if self.cur_slot ~= value then
-        -- We've already seen that slot in this frame, don't insert a duplicate reference!
-        if self.active_slots[value] then
-            self.cur_slot = value
-        else
-            self:addSlot(value)
-        end
-    end
-end
-
 function Input:setupSlotData(value)
-    if #self.MTSlots == 0 then
+    if not self.active_slots[value] then
         self:addSlot(value)
     else
-        self:addSlotIfChanged(value)
+        -- We've already seen that slot in this frame, don't insert a duplicate reference!
+        -- NOTE: May already be set to the correct value if the driver repeats ABS_MT_SLOT (e.g., our android/PB translation layers; or ABS_MT_TRACKING_ID for snow_protocol).
+        self.cur_slot = value
     end
 end
 
@@ -1200,7 +1370,7 @@ function Input:waitEvent(now, deadline)
 
                 local timerfd
                 local sec, usec = time.split_s_us(poll_timeout)
-                ok, ev, timerfd = input.waitForEvent(sec, usec)
+                ok, ev, timerfd = self.input.waitForEvent(sec, usec)
                 -- We got an actual input event, go and process it
                 if ok then break end
 
@@ -1250,7 +1420,7 @@ function Input:waitEvent(now, deadline)
                         -- GestureDetector has guards in place to avoid double frees in case the callback itself
                         -- affected the timerfd or timer_callbacks list (e.g., by dropping a contact).
                         if timerfd then
-                            input.clearTimer(timerfd)
+                            self.input.clearTimer(timerfd)
                         end
                         table.remove(self.timer_callbacks, timer_idx)
 
@@ -1287,7 +1457,7 @@ function Input:waitEvent(now, deadline)
             end
 
             local sec, usec = time.split_s_us(poll_timeout)
-            ok, ev = input.waitForEvent(sec, usec)
+            ok, ev = self.input.waitForEvent(sec, usec)
         end -- if #timer_callbacks > 0
 
         -- Handle errors
@@ -1323,7 +1493,7 @@ function Input:waitEvent(now, deadline)
         for __, event in ipairs(ev) do
             if DEBUG.is_on then
                 -- NOTE: This is rather spammy and computationally intensive,
-                --       and we can't conditionally prevent evalutation of function arguments,
+                --       and we can't conditionally prevent evaluation of function arguments,
                 --       so, just hide the whole thing behind a branch ;).
                 if event.type == C.EV_KEY then
                     logger.dbg(string.format(

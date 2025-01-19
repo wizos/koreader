@@ -60,7 +60,7 @@ function SpinWidget:init()
     self.screen_height = Screen:getHeight()
     if not self.width then
         if not self.width_factor then
-            self.width_factor = 0.6 -- default if no width speficied
+            self.width_factor = 0.6 -- default if no width specified
         end
         self.width = math.floor(math.min(self.screen_width, self.screen_height) * self.width_factor)
     end
@@ -257,7 +257,7 @@ function SpinWidget:update(numberpicker_value, numberpicker_value_index)
     }
     self[1] = WidgetContainer:new{
         align = "center",
-        dimen =Geom:new{
+        dimen = Geom:new{
             x = 0, y = 0,
             w = self.screen_width,
             h = self.screen_height,

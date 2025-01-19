@@ -2,8 +2,8 @@
 -- usage: ./luajit tools/kobo_touch_probe.lua
 
 require "defaults"
-package.path = "common/?.lua;rocks/share/lua/5.1/?.lua;frontend/?.lua;" .. package.path
-package.cpath = "common/?.so;common/?.dll;/usr/lib/lua/?.so;rocks/lib/lua/5.1/?.so;" .. package.cpath
+package.path = "common/?.lua;frontend/?.lua;" .. package.path
+package.cpath = "common/?.so;common/?.dll;/usr/lib/lua/?.so;" .. package.cpath
 
 local DataStorage = require("datastorage")
 local _ = require("gettext")
@@ -109,7 +109,7 @@ function TouchProbe:onTapProbe(arg, ges)
             local need_to_switch_xy = ges.pos.x > ges.pos.y
             self:saveSwitchXYSetting(need_to_switch_xy)
         else
-            -- x not mirroed, need one more probe
+            -- x not mirrored, need one more probe
             self.curr_probe_step = 2
             self:updateProbeInstruction()
             UIManager:setDirty(self)

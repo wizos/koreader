@@ -248,7 +248,7 @@ function ReaderPageMap:onShowPageList()
         pl_menu,
     }
 
-    -- buid up menu widget method as closure
+    -- build up menu widget method as closure
     local pagemap = self
     function pl_menu:onMenuChoice(item)
         pagemap.ui.link:addCurrentLocationToStack()
@@ -274,14 +274,17 @@ end
 
 function ReaderPageMap:getCurrentPageLabel(clean_label)
     -- Note: in scroll mode with PDF, when multiple pages are shown on
-    -- the screen, the advertized page number is the greatest page number
+    -- the screen, the advertised page number is the greatest page number
     -- among the pages shown (so, the page number of the partial page
     -- shown at bottom of screen).
     -- For consistency, getPageMapCurrentPageLabel() returns the last page
     -- label shown in the view if there are more than one (or the previous
     -- one if there is none).
-    local label = self.ui.document:getPageMapCurrentPageLabel()
-    return clean_label and self:cleanPageLabel(label) or label
+    local label, idx, count = self.ui.document:getPageMapCurrentPageLabel()
+    if clean_label then
+        label = self:cleanPageLabel(label)
+    end
+    return label, idx, count
 end
 
 function ReaderPageMap:getFirstPageLabel(clean_label)
@@ -347,6 +350,7 @@ function ReaderPageMap:addToMainMenu(menu_items)
                     -- Reset a few stuff that may use page labels
                     self.ui.toc:resetToc()
                     self.ui.view.footer:onUpdateFooter()
+                    self.ui.annotation:updatePageNumbers(true)
                     UIManager:setDirty(self.view.dialog, "partial")
                 end,
                 hold_callback = function(touchmenu_instance)

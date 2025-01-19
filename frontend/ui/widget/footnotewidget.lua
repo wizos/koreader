@@ -23,7 +23,7 @@ local time = require("ui/time")
 
 -- Note: we can't use < or > in comments in the CSS, or MuPDF complains with:
 --   error: css syntax error: unterminated comment.
--- So, HTML tags in comments are written upppercase (eg: <li> => LI)
+-- So, HTML tags in comments are written uppercase (eg: <li> => LI)
 
 -- Independent string for @page, so we can T() it individually,
 -- without needing to escape % in DEFAULT_CSS
@@ -38,7 +38,7 @@ local PAGE_CSS = [[
 
 -- Make default MuPDF styles (source/html/html-layout.c) a bit
 -- more similar to our epub.css ones, and more condensed to fit
--- in a small bottom pannel
+-- in a small bottom panel
 local DEFAULT_CSS = [[
 body {
     margin: 0;                  /* MuPDF: margin: 1em */
@@ -71,6 +71,10 @@ body > li { list-style-type: none; }
 
 /* Remove any (possibly multiple) backlinks in Wikipedia EPUBs footnotes */
 .noprint { display: none; }
+
+/* Let MuPDF know about crengine internal block elements,
+ * so it doesn't render them inline */
+autoBoxing, floatBox, tabularBox { display: block; }
 
 /* Style some FB2 tags not known to MuPDF */
 strike, strikethrough { text-decoration: line-through; }
@@ -115,7 +119,7 @@ body > section > title {
 local FootnoteWidget = InputContainer:extend{
     html = nil,
     css = nil,
-    -- font_face can't really be overriden, it needs to be known by MuPDF
+    -- font_face can't really be overridden, it needs to be known by MuPDF
     font_face = "Noto Sans",
     -- For the doc_* values, we expect to be provided with the real
     -- (already scaled) sizes in screen pixels
@@ -131,6 +135,7 @@ local FootnoteWidget = InputContainer:extend{
     on_tap_close_callback = nil,
     close_callback = nil,
     dialog = nil,
+    covers_footer = true,
 }
 
 function FootnoteWidget:init()
@@ -144,6 +149,12 @@ function FootnoteWidget:init()
             w = Screen:getWidth(),
             h = Screen:getHeight(),
         }
+
+        local hold_pan_rate = G_reader_settings:readSetting("hold_pan_rate")
+        if not hold_pan_rate then
+            hold_pan_rate = Screen.low_pan_rate and 5.0 or 30.0
+        end
+
         self.ges_events = {
             TapClose = {
                 GestureRange:new{
@@ -165,8 +176,9 @@ function FootnoteWidget:init()
             },
             HoldPanText = {
                 GestureRange:new{
-                    ges = "hold",
+                    ges = "hold_pan",
                     range = range,
+                    rate = hold_pan_rate,
                 },
             },
             HoldReleaseText = {
@@ -177,9 +189,13 @@ function FootnoteWidget:init()
                 -- callback function when HoldReleaseText is handled as args
                 args = function(text, hold_duration)
                     if self.dialog then
+                        local dict_close_callback = function()
+                            self.htmlwidget.htmlbox_widget:scheduleClearHighlightAndRedraw()
+                        end
+
                         local lookup_target = hold_duration < time.s(3) and "LookupWord" or "LookupWikipedia"
                         self.dialog:handleEvent(
-                            Event:new(lookup_target, text)
+                            Event:new(lookup_target, text, nil, nil, nil, nil, dict_close_callback)
                         )
                     end
                 end
@@ -293,8 +309,11 @@ function FootnoteWidget:init()
     local padding_bottom = Size.padding.large
     local htmlwidget_height = self.height - padding_top - padding_bottom
 
+    -- We always get balanced XHTML from crengine for HTML snippets, so we
+    -- pass is_xhtml=true to avoid side effects from MuPDF's HTML5 parser.
     self.htmlwidget = ScrollHtmlWidget:new{
         html_body = self.html,
+        is_xhtml = true,
         css = css,
         default_font_size = font_size,
         width = htmlwidget_width,
@@ -302,6 +321,7 @@ function FootnoteWidget:init()
         scroll_bar_width = scroll_bar_width,
         text_scroll_span = text_scroll_span,
         dialog = self.dialog,
+        highlight_text_selection = true,
     }
 
     -- We only want a top border, so use a LineWidget for that

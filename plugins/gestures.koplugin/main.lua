@@ -16,7 +16,6 @@ local Screen = require("device").screen
 local SpinWidget = require("ui/widget/spinwidget")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
 local T = FFIUtil.template
@@ -76,8 +75,8 @@ local gestures_list = {
     two_finger_swipe_southwest = "⇙",
     spread_gesture = _("Spread"),
     pinch_gesture = _("Pinch"),
-    rotate_cw = _("Rotate ⤸ 90°"),
-    rotate_ccw = _("Rotate ⤹ 90°"),
+    rotate_cw = _("Rotate clockwise ⤸ 90°"),
+    rotate_ccw = _("Rotate counterclockwise ⤹ 90°"),
     multiswipe = "", -- otherwise registerGesture() won't pick up on multiswipes
     multiswipe_west_east = "⬅ ➡",
     multiswipe_east_west = "➡ ⬅",
@@ -140,9 +139,6 @@ end
 
 function Gestures:init()
     local defaults_path = FFIUtil.joinPath(self.path, "defaults.lua")
-    if not lfs.attributes(gestures_path, "mode") then
-        FFIUtil.copyFile(defaults_path, gestures_path)
-    end
     self.ignore_hold_corners = G_reader_settings:isTrue("ignore_hold_corners")
     self.multiswipes_enabled = G_reader_settings:isTrue("multiswipes_enabled")
     self.is_docless = self.ui == nil or self.ui.document == nil
@@ -150,6 +146,12 @@ function Gestures:init()
     self.defaults = LuaSettings:open(defaults_path).data[self.ges_mode]
     if not self.settings_data then
         self.settings_data = LuaSettings:open(gestures_path)
+        if not next(self.settings_data.data) then
+            logger.warn("No gestures file or invalid gestures file found, copying defaults")
+            self.settings_data:purge()
+            FFIUtil.copyFile(defaults_path, gestures_path)
+            self.settings_data = LuaSettings:open(gestures_path)
+        end
     end
     self.gestures = self.settings_data.data[self.ges_mode]
     self.custom_multiswipes = self.settings_data.data["custom_multiswipes"]
@@ -244,6 +246,7 @@ function Gestures:genMenu(ges)
         end,
     })
     Dispatcher:addSubMenu(self, sub_items, self.gestures, ges)
+    sub_items.max_per_page = nil -- restore default, settings in page 2
     table.insert(sub_items, {
         text = _("Anchor QuickMenu to gesture position"),
         checked_func = function()
@@ -298,7 +301,7 @@ function Gestures:genMenu(ges)
 end
 
 function Gestures:genSubItem(ges, separator, hold_callback)
-    local reader_only = {tap_top_left_corner=true, tap_top_right_corner=true,}
+    local reader_only = {tap_top_left_corner=true, tap_top_right_corner=true, hold_top_left_corner=true,}
     local enabled_func
     if reader_only[ges] then
        enabled_func = function() return self.ges_mode == "gesture_reader" end
@@ -309,7 +312,6 @@ function Gestures:genSubItem(ges, separator, hold_callback)
         sub_item_table_func = function() return self:genMenu(ges) end,
         separator = separator,
         hold_callback = hold_callback,
-        menu_item_id = ges,
         ignored_by_menu_search = true, -- This item is not strictly duplicated, but its subitems are.
                                        -- Ignoring it speeds up search.
     }
@@ -759,7 +761,7 @@ function Gestures:addToMainMenu(menu_items)
             sub_item_table = self:genSubItemTable({"spread_gesture", "pinch_gesture"}),
         })
         table.insert(menu_items.gesture_manager.sub_item_table, {
-            text = _("Rotation"),
+            text = _("Two-finger rotation"),
             sub_item_table = self:genSubItemTable({"rotate_cw", "rotate_ccw"}),
         })
     end
@@ -784,21 +786,33 @@ function Gestures:setupGesture(ges)
         ratio_w = 1, ratio_h = 1,
     }
 
+    local dswipe_zone_left_edge = G_defaults:readSetting("DSWIPE_ZONE_LEFT_EDGE")
     local zone_left_edge = {
-        ratio_x = 0, ratio_y = 0,
-        ratio_w = 1/8, ratio_h = 1,
+        ratio_x = dswipe_zone_left_edge.x,
+        ratio_y = dswipe_zone_left_edge.y,
+        ratio_w = dswipe_zone_left_edge.w,
+        ratio_h = dswipe_zone_left_edge.h,
     }
+    local dswipe_zone_right_edge = G_defaults:readSetting("DSWIPE_ZONE_RIGHT_EDGE")
     local zone_right_edge = {
-        ratio_x = 7/8, ratio_y = 0,
-        ratio_w = 1/8, ratio_h = 1,
+        ratio_x = dswipe_zone_right_edge.x,
+        ratio_y = dswipe_zone_right_edge.y,
+        ratio_w = dswipe_zone_right_edge.w,
+        ratio_h = dswipe_zone_right_edge.h,
     }
+    local dswipe_zone_top_edge = G_defaults:readSetting("DSWIPE_ZONE_TOP_EDGE")
     local zone_top_edge = {
-        ratio_x = 0, ratio_y = 0,
-        ratio_w = 1, ratio_h = 1/8,
+        ratio_x = dswipe_zone_top_edge.x,
+        ratio_y = dswipe_zone_top_edge.y,
+        ratio_w = dswipe_zone_top_edge.w,
+        ratio_h = dswipe_zone_top_edge.h,
     }
+    local dswipe_zone_bottom_edge = G_defaults:readSetting("DSWIPE_ZONE_BOTTOM_EDGE")
     local zone_bottom_edge = {
-        ratio_x = 0, ratio_y = 7/8,
-        ratio_w = 1, ratio_h = 1/8,
+        ratio_x = dswipe_zone_bottom_edge.x,
+        ratio_y = dswipe_zone_bottom_edge.y,
+        ratio_w = dswipe_zone_bottom_edge.w,
+        ratio_h = dswipe_zone_bottom_edge.h,
     }
 
     local dtap_zone_top_left = G_defaults:readSetting("DTAP_ZONE_TOP_LEFT")
@@ -1199,6 +1213,43 @@ function Gestures:onFlushSettings()
     if self.settings_data and self.updated then
         self.settings_data:flush()
         self.updated = false
+    end
+end
+
+function Gestures:updateProfiles(action_old_name, action_new_name)
+    for _, section in ipairs({ "gesture_fm", "gesture_reader" }) do
+        local gestures = self.settings_data.data[section]
+        for gesture_name, gesture in pairs(gestures) do
+            if gesture[action_old_name] then
+                if gesture.settings and gesture.settings.order then
+                    for i, action in ipairs(gesture.settings.order) do
+                        if action == action_old_name then
+                            if action_new_name then
+                                gesture.settings.order[i] = action_new_name
+                            else
+                                table.remove(gesture.settings.order, i)
+                                if #gesture.settings.order == 0 then
+                                    gesture.settings.order = nil
+                                    if next(gesture.settings) == nil then
+                                        gesture.settings = nil
+                                    end
+                                end
+                            end
+                            break
+                        end
+                    end
+                end
+                gesture[action_old_name] = nil
+                if action_new_name then
+                    gesture[action_new_name] = true
+                else
+                    if next(gesture) == nil then
+                        self.settings_data.data[section][gesture_name] = nil
+                    end
+                end
+                self.updated = true
+            end
+        end
     end
 end
 
