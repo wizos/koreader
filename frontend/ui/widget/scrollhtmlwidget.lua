@@ -17,11 +17,13 @@ local Screen = Device.screen
 
 local ScrollHtmlWidget = InputContainer:extend{
     html_body = nil,
+    is_xhtml = false,
     css = nil,
     default_font_size = Screen:scaleBySize(24), -- same as infofont
     htmlbox_widget = nil,
     v_scroll_bar = nil,
     dialog = nil,
+    highlight_text_selection = false,
     html_link_tapped_callback = nil,
     dimen = nil,
     width = 0,
@@ -36,10 +38,12 @@ function ScrollHtmlWidget:init()
             w = self.width - self.scroll_bar_width - self.text_scroll_span,
             h = self.height,
         },
+        dialog = self.dialog,
+        highlight_text_selection = self.highlight_text_selection,
         html_link_tapped_callback = self.html_link_tapped_callback,
     }
 
-    self.htmlbox_widget:setContent(self.html_body, self.css, self.default_font_size)
+    self.htmlbox_widget:setContent(self.html_body, self.css, self.default_font_size, self.is_xhtml, nil, self.html_resource_directory)
 
     self.v_scroll_bar = VerticalScrollBar:new{
         enable = self.htmlbox_widget.page_count > 1,
@@ -98,7 +102,7 @@ end
 -- Reset the scrolling *state* to the top of the document, but don't actually re-render/refresh anything.
 -- (Useful when replacing a Scroll*Widget during an update call, c.f., DictQuickLookup).
 function ScrollHtmlWidget:resetScroll()
-    self.htmlbox_widget.page_number = 1
+    self.htmlbox_widget:setPageNumber(1)
     self:_updateScrollBar()
 
     self.v_scroll_bar.enable = self.htmlbox_widget.page_count > 1
@@ -113,7 +117,7 @@ function ScrollHtmlWidget:scrollToRatio(ratio)
     if page_num == self.htmlbox_widget.page_number then
         return
     end
-    self.htmlbox_widget.page_number = page_num
+    self.htmlbox_widget:setPageNumber(page_num)
     self:_updateScrollBar()
 
     self.htmlbox_widget:freeBb()
@@ -144,13 +148,13 @@ function ScrollHtmlWidget:scrollText(direction)
             return
         end
 
-        self.htmlbox_widget.page_number = self.htmlbox_widget.page_number + 1
+        self.htmlbox_widget:setPageNumber(self.htmlbox_widget.page_number + 1)
     elseif direction < 0 then
         if self.htmlbox_widget.page_number <= 1 then
             return
         end
 
-        self.htmlbox_widget.page_number = self.htmlbox_widget.page_number - 1
+        self.htmlbox_widget:setPageNumber(self.htmlbox_widget.page_number - 1)
     end
     self:_updateScrollBar()
 

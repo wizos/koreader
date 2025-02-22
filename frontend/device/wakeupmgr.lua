@@ -47,6 +47,10 @@ end
 
 function WakeupMgr:init()
     self._task_queue = {}
+
+    -- Propagate rtc quirks to the RTC backend
+    self.rtc.dev_rtc = self.dev_rtc
+    self.rtc.dodgy_rtc = self.dodgy_rtc
 end
 
 -- This is a dummy task we use when working around i.MX5 RTC issues.
@@ -134,7 +138,7 @@ function WakeupMgr:removeTasks(epoch, callback)
             end
             table.remove(self._task_queue, k)
             removed = true
-            -- If we've successfuly pop'ed the upcoming task, we need to schedule the next one (if any) on exit.
+            -- If we've successfully pop'ed the upcoming task, we need to schedule the next one (if any) on exit.
             if k == 1 then
                 reschedule = true
             end

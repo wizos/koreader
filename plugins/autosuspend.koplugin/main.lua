@@ -408,11 +408,12 @@ function AutoSuspend:pickTimeoutValue(touchmenu_instance, title, info, setting,
     local is_standby = setting == "auto_standby_timeout_seconds"
 
     local day, hour, minute, second
-    local day_max, hour_max, min_max, sec_max
+    local day_max, day_min, hour_max, min_max, sec_max
     if time_scale == 2 then
         day = math.floor(setting_val * (1/(24*3600)))
         hour = math.floor(setting_val * (1/3600)) % 24
         day_max = math.floor(range[2] * (1/(24*3600))) - 1
+        day_min = 0
         hour_max = 23
     elseif time_scale == 1 then
         hour = math.floor(setting_val * (1/3600))
@@ -437,6 +438,7 @@ function AutoSuspend:pickTimeoutValue(touchmenu_instance, title, info, setting,
         min_hold_step = 10,
         sec_hold_step = 10,
         day_max = day_max,
+        day_min = day_min,
         hour_max = hour_max,
         min_max = min_max,
         sec_max = sec_max,
@@ -465,6 +467,7 @@ function AutoSuspend:pickTimeoutValue(touchmenu_instance, title, info, setting,
                 text = T(_("%1: %2"), title, time_string),
                 timeout = 3,
             })
+            time_spinner:onClose()
         end,
         default_value = datetime.secondsToClockDuration("letters", default_value,
             time_scale == 2 or time_scale == 1, true),
@@ -549,7 +552,7 @@ function AutoSuspend:addToMainMenu(menu_items)
             keep_menu_open = true,
             callback = function(touchmenu_instance)
                 -- 5*60 sec (5') is the minimum and 28*24*3600 (28days) is the maximum shutdown time.
-                -- Minimum time has to be big enough, to avoid start-stop death scenarious.
+                -- Minimum time has to be big enough, to avoid start-stop death scenarios.
                 -- Maximum more than four weeks seems a bit excessive if you want to enable authoshutdown,
                 -- even if the battery can last up to three months.
                 self:pickTimeoutValue(touchmenu_instance,
@@ -673,7 +676,10 @@ end
 function AutoSuspend:onNetworkConnecting()
     logger.dbg("AutoSuspend: onNetworkConnecting")
     self:_unschedule_standby()
-    -- Schedule the next check in 60s. If something goes wrong, the subsequent checks are in `self.auto_standby_timeout_seconds`.
+    -- Schedule the next check in 60s, which should account for the full duration of NetworkMgr's connectivity check (it times out at 45s),
+    -- with some extra breathing room.
+    -- If the connection attempt fails (in which case we get neither a NetworkConnected nor a NetworkDisconnected event),
+    -- the subsequent checks are in the usual `self.auto_standby_timeout_seconds`.
     self:_start_standby(time.s(60))
 end
 

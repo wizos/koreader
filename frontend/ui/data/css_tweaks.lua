@@ -189,7 +189,7 @@ These tweaks allow you to change this behavior, and to override publisher rules.
                 separator = true,
             },
             -- To avoid duplicating these 2 tweaks into 2 others for ignoring publisher rules,
-            -- we apply the rules to BODY without !important (so they can still be overriden
+            -- we apply the rules to BODY without !important (so they can still be overridden
             -- by publisher rules applied to BODY), and to DocFragment with !important (so
             -- that with "* {widows/orphans: inherit !important}", all elements will inherit
             -- from the DocFragment rules.
@@ -420,6 +420,13 @@ Further small adjustments can be done with 'Line Spacing' in the bottom menu.]])
         {
             title = _("Font size and families"),
             {
+                id = "font_no_presentational_hints",
+                title = _("Ignore font related HTML presentational hints"),
+                description = _("Ignore HTML attributes that contribute to styles on the elements <body> (bgcolor, text…) and <font> (face, size, color…)."),
+                css = [[body, font { -cr-hint: no-presentational; }]],
+                separator = true,
+            },
+            {
                 id = "font_family_all_inherit",
                 title = _("Ignore publisher font families"),
                 description = _("Disable font-family specified in embedded styles."),
@@ -471,6 +478,26 @@ sup { font-size: 50% !important; vertical-align: super !important; }
 sub { font-size: 50% !important; vertical-align: sub !important; }
                 ]],
             },
+            (function()
+                local sub_table = {
+                    title = _("Override font-based normal line height"),
+                }
+                for __, height in ipairs( { 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45, 1.5 } ) do
+                    table.insert(sub_table, {
+                        id = T("normal_line-height_%1", height * 100),
+                        conflicts_with = function(id) return util.stringStartsWith(id, "normal_line-height_") end,
+                        title = T(_("Normal line height: %1"), height),
+                        css = T([[
+* {
+    -cr-hint: late;
+    -cr-only-if: line-height-normal;
+        line-height: %1 !important;
+}
+                        ]], height),
+                    })
+                end
+                return sub_table
+            end)(),
         },
     },
     {
@@ -564,6 +591,13 @@ body, h1, h2, h3, h4, h5, h6, div, li, td, th { text-indent: 0 !important; }
         title = _("Tables, links, images"),
         {
             title = _("Tables"),
+            {
+                id = "table_no_presentational_hints",
+                title = _("Ignore tables related HTML presentational hints"),
+                description = _("Ignore HTML attributes that contribute to styles on the <table> element and its sub-elements (ie. align, valign, frame, rules, border, cellpadding, cellspacing…)."),
+                css = [[table, caption, colgroup, col, thead, tbody, tfoot, tr, td, th { -cr-hint: no-presentational; }]],
+                separator = true,
+            },
             {
                 id = "table_full_width",
                 title = _("Full-width tables"),
@@ -670,7 +704,7 @@ table, tcaption, tr, th, td { border: black solid 1px; border-collapse: collapse
                 title = _("Full-width images"),
                 description = _("Useful for books containing only images, when they are smaller than your screen. May stretch images in some cases."),
                 -- This helped me once with a book. Will mess with aspect ratio
-                -- when images have a style="width: NNpx; heigh: NNpx"
+                -- when images have a style="width: NNpx; height: NNpx"
                 css = [[
 img {
 text-align: center !important;
@@ -965,6 +999,8 @@ This tweak can be duplicated as a user style tweak when books contain footnotes 
 .footnote, .footnotes, .fn,
 .note, .note1, .note2, .note3,
 .ntb, .ntb-txt, .ntb-txt-j,
+.fnote, .fnote1,
+.duokan-footnote-item, /* Common chinese books */
 .przypis, .przypis1, /* Polish footnotes */
 .voetnoten /* Dutch footnotes */
 {
@@ -1003,7 +1039,7 @@ This tweak can be duplicated as a user style tweak when books contain footnotes 
         -- to apply the hint).
         -- For the font-size changes, we want to match only block elements (with "-inline")
         -- as we want to keep any relative font-size (ie. 0.5em) for inline nodes like <sup>.
-        -- We also add a selector for the <autoBoxing> internal element (which are explicitely
+        -- We also add a selector for the <autoBoxing> internal element (which are explicitly
         -- not matched by '*') as we may get some in/as footnote containers, and they would
         -- inherit some of these properties, that we wish to reset too.
         (function()
@@ -1105,7 +1141,7 @@ This will break any complex footnote containing quotes or lists.]]),
                 id = "inpage_footnote_regularize_text",
                 title = _("Regularize text size on inline elements"),
                 description = _([[
-If the footnote text uses variable or absolute font sizes, line height or vertical alignments, which would make it too irregular, you can reset all of them to get a leaner text (to the expense of loosing superscripts).]]),
+If the footnote text uses variable or absolute font sizes, line height or vertical alignments, which would make it too irregular, you can reset all of them to get a leaner text (to the expense of losing superscripts).]]),
                 priority = 6,
                 css = [[
 *, autoBoxing {
@@ -1114,6 +1150,21 @@ If the footnote text uses variable or absolute font sizes, line height or vertic
         font-size: inherit !important;
         line-height: inherit !important;
         vertical-align: inherit !important;
+}
+                ]],
+            },
+            {
+                id = "inpage_footnote_combine_non_linear",
+                title = _("Combine footnotes in a non-linear flow"),
+                description = _([[
+This will mark each section of consecutive footnotes (at their original location in the book) as being non-linear.
+The menu checkbox "Hide non-linear fragments" will then be available after the document is reopened, allowing to hide these sections from the regular flow: they will be skipped when turning pages and not considered in the various book & chapter progress and time to read features.]]),
+                priority = 6,
+                css = [[
+*, autoBoxing {
+    -cr-hint: late;
+    -cr-only-if: inpage-footnote;
+        -cr-hint: non-linear-combining;
 }
                 ]],
             },

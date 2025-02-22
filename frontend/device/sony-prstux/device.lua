@@ -14,7 +14,7 @@ local SonyPRSTUX = Generic:extend{
     model = "Sony PRSTUX",
     isSonyPRSTUX = yes,
     hasKeys = yes,
-    hasOTAUpdates = yes,
+    hasOTAUpdates = no,
     hasWifiManager = yes,
     canReboot = yes,
     canPowerOff = yes,
@@ -56,13 +56,13 @@ function SonyPRSTUX:init()
     self.powerd = require("device/sony-prstux/powerd"):new{device = self}
     self.input = require("device/input"):new{
         device = self,
-        event_map = require("device/sony-prstux/event_map"),
+        event_map = dofile("frontend/device/sony-prstux/event_map.lua"),
     }
 
-    self.input.open("/dev/input/event0") -- Keys
-    self.input.open("/dev/input/event1") -- touchscreen
-    self.input.open("/dev/input/event2") -- power button
-    self.input.open("fake_events") -- usb plug-in/out and charging/not-charging
+    self.input:open("/dev/input/event0") -- Keys
+    self.input:open("/dev/input/event1") -- touchscreen
+    self.input:open("/dev/input/event2") -- power button
+    self.input:open("fake_events") -- usb plug-in/out and charging/not-charging
     self.input:registerEventAdjustHook(adjustTouchEvt)
 
     local rotation_mode = self.screen.DEVICE_ROTATED_COUNTER_CLOCKWISE

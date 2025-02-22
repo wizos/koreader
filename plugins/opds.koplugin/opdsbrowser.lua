@@ -1,9 +1,9 @@
 local BD = require("ui/bidi")
 local ButtonDialog = require("ui/widget/buttondialog")
 local Cache = require("cache")
+local CheckButton = require("ui/widget/checkbutton")
 local ConfirmBox = require("ui/widget/confirmbox")
 local DocumentRegistry = require("document/documentregistry")
-local Font = require("ui/font")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local Menu = require("ui/widget/menu")
@@ -99,6 +99,7 @@ function OPDSBrowser:genItemTableFromRoot()
             url        = server.url,
             username   = server.username,
             password   = server.password,
+            raw_names  = server.raw_names, -- use server raw filenames for download
             searchable = server.url:match("%%s") and true or false,
         })
     end
@@ -133,7 +134,7 @@ function OPDSBrowser:addEditCatalog(item)
         title = _("Add OPDS catalog")
     end
 
-    local dialog
+    local dialog, check_button_raw_names
     dialog = MultiInputDialog:new{
         title = title,
         fields = fields,
@@ -149,13 +150,21 @@ function OPDSBrowser:addEditCatalog(item)
                 {
                     text = _("Save"),
                     callback = function()
-                        self:editCatalogFromInput(dialog:getFields(), item)
+                        local new_fields = dialog:getFields()
+                        new_fields[5] = check_button_raw_names.checked or nil
+                        self:editCatalogFromInput(new_fields, item)
                         UIManager:close(dialog)
                     end,
                 },
             },
         },
     }
+    check_button_raw_names = CheckButton:new{
+        text = _("Use server filenames"),
+        checked = item and item.raw_names,
+        parent = dialog,
+    }
+    dialog:addWidget(check_button_raw_names)
     UIManager:show(dialog)
     dialog:onShowKeyboard()
 end
@@ -182,7 +191,8 @@ function OPDSBrowser:addSubCatalog(item_url)
                         local name = dialog:getInputText()
                         if name ~= "" then
                             UIManager:close(dialog)
-                            local fields = {name, item_url, self.root_catalog_username, self.root_catalog_password}
+                            local fields = {name, item_url,
+                                self.root_catalog_username, self.root_catalog_password, self.root_catalog_raw_names}
                             self:editCatalogFromInput(fields, false, true) -- no init, stay in the subcatalog
                         end
                     end,
@@ -207,10 +217,11 @@ function OPDSBrowser:editCatalogFromInput(fields, item, no_init)
     else -- add new
         new_server = {}
     end
-    new_server.title    = fields[1]
-    new_server.url      = fields[2]:match("^%a+://") and fields[2] or "http://" .. fields[2]
-    new_server.username = fields[3] ~= "" and fields[3] or nil
-    new_server.password = fields[4]
+    new_server.title     = fields[1]
+    new_server.url       = fields[2]:match("^%a+://") and fields[2] or "http://" .. fields[2]
+    new_server.username  = fields[3] ~= "" and fields[3] or nil
+    new_server.password  = fields[4]
+    new_server.raw_names = fields[5]
     if not item then
         table.insert(self.opds_servers, new_server)
     end
@@ -246,12 +257,12 @@ function OPDSBrowser:fetchFeed(item_url, headers_only)
         user     = self.root_catalog_username,
         password = self.root_catalog_password,
     }
-    logger.dbg("Request:", request)
+    logger.dbg("Request:", socketutil.redact_request(request))
     local code, headers, status = socket.skip(1, http.request(request))
     socketutil:reset_timeout()
 
     if headers_only then
-        return headers and headers["last-modified"]
+        return headers
     end
     if code == 200 then
         local xml = table.concat(sink)
@@ -280,11 +291,13 @@ function OPDSBrowser:fetchFeed(item_url, headers_only)
         text = text,
         icon = icon,
     })
+    logger.dbg(string.format("OPDS: Failed to fetch catalog `%s`: %s", item_url, text))
 end
 
 -- Parses feed to catalog
 function OPDSBrowser:parseFeed(item_url)
-    local feed_last_modified = self:fetchFeed(item_url, true) -- headers only
+    local headers = self:fetchFeed(item_url, true)
+    local feed_last_modified = headers and headers["last-modified"]
     local feed
     if feed_last_modified then
         local hash = "opds|catalog|" .. item_url .. "|" .. feed_last_modified
@@ -304,6 +317,21 @@ function OPDSBrowser:parseFeed(item_url)
     end
     if feed then
         return OPDSParser:parse(feed)
+    end
+end
+
+function OPDSBrowser:getServerFileName(item_url)
+    local headers = self:fetchFeed(item_url, true)
+    if headers then
+        logger.dbg("OPDSBrowser: server file headers", socketutil.redact_headers(headers))
+        local header = headers["content-disposition"]
+        if header then
+            return header:match('filename="*([^"]+)"*')
+        end
+        header = headers["location"]
+        if header then
+            return header:gsub(".*/", "")
+        end
     end
 end
 
@@ -345,6 +373,7 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
         return url.absolute(item_url, href)
     end
 
+    local has_opensearch = false
     local hrefs = {}
     if feed.link then
         for __, link in ipairs(feed.link) do
@@ -354,13 +383,25 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
                         hrefs[link.rel] = build_href(link.href)
                     end
                 end
+                -- OpenSearch
                 if link.type:find(self.search_type) then
                     if link.href then
                         table.insert(item_table, { -- the first item in each subcatalog
                             text       = "\u{f002} " .. _("Search"), -- append SEARCH icon
                             url        = build_href(self:getSearchTemplate(build_href(link.href))),
                             searchable = true,
-                       })
+                        })
+                        has_opensearch = true
+                    end
+                end
+                -- Calibre search (also matches the actual template for OpenSearch!)
+                if link.type:find(self.search_template_type) and link.rel and link.rel:find("search") then
+                    if link.href and not has_opensearch then
+                        table.insert(item_table, {
+                            text       = "\u{f002} " .. _("Search"),
+                            url        = build_href(link.href:gsub("{searchTerms}", "%%s")),
+                            searchable = true,
+                        })
                     end
                 end
             end
@@ -486,7 +527,8 @@ function OPDSBrowser:updateCatalog(item_url, paths_updated)
             self:addSubCatalog(item_url)
         end
         if self.page_num <= 1 then
-            self:onNext()
+            -- Request more content, but don't change the page
+            self:onNextPage(true)
         end
     end
 end
@@ -496,7 +538,10 @@ function OPDSBrowser:appendCatalog(item_url)
     local menu_table = self:genItemTableFromURL(item_url)
     if #menu_table > 0 then
         for _, item in ipairs(menu_table) do
-            table.insert(self.item_table, item)
+            -- Don't append multiple search entries
+            if not item.searchable then
+                table.insert(self.item_table, item)
+            end
         end
         self.item_table.hrefs = menu_table.hrefs
         self:switchItemTable(self.catalog_title, self.item_table, -1)
@@ -546,10 +591,13 @@ function OPDSBrowser:showDownloads(item)
         filename = item.author .. " - " .. filename
     end
     local filename_orig = filename
+    if self.root_catalog_raw_names then
+        filename = nil
+    end
 
     local function createTitle(path, file) -- title for ButtonDialog
         return T(_("Download folder:\n%1\n\nDownload filename:\n%2\n\nDownload file type:"),
-            BD.dirpath(path), file)
+            BD.dirpath(path), file or _("<server filename>"))
     end
 
     local buttons = {} -- buttons for ButtonDialog
@@ -594,7 +642,9 @@ function OPDSBrowser:showDownloads(item)
                 table.insert(download_buttons, {
                     text = text .. "\u{2B07}", -- append DOWNWARDS BLACK ARROW
                     callback = function()
-                        self:downloadFile(filename .. "." .. string.lower(filetype), acquisition.href)
+                        local file = filename and filename .. "." .. string.lower(filetype)
+                                               or self:getServerFileName(acquisition.href)
+                        self:downloadFile(file, acquisition.href)
                         UIManager:close(self.download_dialog)
                     end,
                 })
@@ -639,7 +689,7 @@ function OPDSBrowser:showDownloads(item)
                 local dialog
                 dialog = InputDialog:new{
                     title = _("Enter filename"),
-                    input = filename,
+                    input = filename or filename_orig,
                     input_hint = filename_orig,
                     buttons = {
                         {
@@ -688,7 +738,7 @@ function OPDSBrowser:showDownloads(item)
                     title = item.text,
                     title_multilines = true,
                     text = util.htmlToPlainTextIfHtml(item.content),
-                    text_face = Font:getFace("x_smallinfofont", G_reader_settings:readSetting("items_font_size")),
+                    text_type = "book_info",
                 })
             end,
         },
@@ -785,9 +835,10 @@ function OPDSBrowser:onMenuSelect(item)
         self:showDownloads(item)
     else -- catalog or Search item
         if #self.paths == 0 then -- root list
-            self.root_catalog_title    = item.text
-            self.root_catalog_username = item.username
-            self.root_catalog_password = item.password
+            self.root_catalog_title     = item.text
+            self.root_catalog_username  = item.username
+            self.root_catalog_password  = item.password
+            self.root_catalog_raw_names = item.raw_names
         end
         local connect_callback
         if item.searchable then
@@ -815,13 +866,6 @@ function OPDSBrowser:onMenuHold(item)
         buttons = {
             {
                 {
-                    text = _("Edit"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:addEditCatalog(item)
-                    end,
-                },
-                {
                     text = _("Delete"),
                     callback = function()
                         UIManager:show(ConfirmBox:new{
@@ -832,6 +876,13 @@ function OPDSBrowser:onMenuHold(item)
                                 self:deleteCatalog(item)
                             end,
                         })
+                    end,
+                },
+                {
+                    text = _("Edit"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:addEditCatalog(item)
                     end,
                 },
             },
@@ -872,7 +923,7 @@ function OPDSBrowser:onHoldReturn()
 end
 
 -- Menu action on next-page chevron tap (request and show more catalog entries)
-function OPDSBrowser:onNext()
+function OPDSBrowser:onNextPage(fill_only)
     -- self.page_num comes from menu.lua
     local page_num = self.page_num
     -- fetch more entries until we fill out one page or reach the end
@@ -885,6 +936,10 @@ function OPDSBrowser:onNext()
         else
             break
         end
+    end
+    if not fill_only then
+        -- We also *do* want to paginate, so call the base class.
+        Menu.onNextPage(self)
     end
     return true
 end

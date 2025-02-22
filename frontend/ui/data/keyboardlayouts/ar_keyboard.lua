@@ -1,5 +1,5 @@
-local en_popup = require("ui/data/keyboardlayouts/keypopup/en_popup")
-local ar_popup = require("ui/data/keyboardlayouts/keypopup/ar_popup")
+local en_popup = dofile("frontend/ui/data/keyboardlayouts/keypopup/en_popup.lua")
+local ar_popup = dofile("frontend/ui/data/keyboardlayouts/keypopup/ar_popup.lua")
 local com = en_popup.com -- comma (,)
 local prd = en_popup.prd -- period (.)
 local _at = en_popup._at
@@ -27,6 +27,7 @@ local raa = ar_popup.raa
 local sheen = ar_popup.sheen
 local taa = ar_popup.taa
 local thaa = ar_popup.thaa
+local th_aa = ar_popup.th_aa
 local thaal = ar_popup.thaal
 local dhad = ar_popup.dhad
 local ghayn = ar_popup.ghayn
@@ -96,7 +97,7 @@ return {
             { "'",                       taamarbouta,  "'",    "]", },
             {  arabic_comma,             waw,          "#",    "↑", },
             { ".",                       zay,          "@",    "↓", },
-            { "؟",                       thaa,         "!",    _at, },
+            { "؟",                       th_aa,         "!",    _at, },
             { label = "",
               width = 1.5,
               bold = false

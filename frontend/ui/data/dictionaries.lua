@@ -2073,7 +2073,7 @@ local dictionaries = {
         lang_out = "eng",
         entries = 20431,
         license = "Dual-licensed under CC-BY-SA 3.0 and GFDL",
-        url = "https://github.com/Vuizur/Wiktionary-Dictionaries/raw/master/Norwegian%20Bokmål-English%20Wiktionary%20dictionary%20stardict.tar.gz",
+        url = "https://github.com/Vuizur/Wiktionary-Dictionaries/raw/master/Norwegian%20Bokm%C3%A5l-English%20Wiktionary%20dictionary%20stardict.tar.gz",
     },
     {
         name = "Norwegian Nynorsk-English Wiktionary",
@@ -2722,6 +2722,14 @@ local dictionaries = {
         entries = 387517,
         license = "Open Vietnamese Dictionary Project, https://sourceforge.net/projects/ovdp/",
         url = "https://khoicandev.github.io/ovdp-mirror/en-vi.tar.gz"
+    },
+    {
+        name = "English-Persian dictionary",
+        lang_in = "eng",
+        lang_out = "fas",
+        entries = 145075,
+        license = "MIT, https://github.com/hossein1376/English-Persian-Kindle-Custom-Dictionary",
+        url = "https://github.com/hossein1376/English-Persian-Kindle-Custom-Dictionary/raw/main/English%20Persian%20Dictionary.tar.gz"
     },
     {
         name = "Vietnamese-English dictionary",

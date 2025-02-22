@@ -1,11 +1,12 @@
 --[[--
-This plugin provides a terminal emulator (VT52 (+some ANSI))
+This plugin provides a terminal emulator (VT52 (+some ANSI and some VT100))
 
 @module koplugin.terminal
 ]]
 
 local Device = require("device")
 local logger = require("logger")
+local util = require("util")
 local ffi = require("ffi")
 local C = ffi.C
 require("ffi/posix_h")
@@ -36,17 +37,17 @@ local function check_prerequisites()
 
     local ptmx = C.open("/dev/ptmx", bit.bor(C.O_RDWR, C.O_NONBLOCK, C.O_CLOEXEC))
     if ptmx == -1 then
-        logger.warn("Terminal: can not open /dev/ptmx:", ffi.string(C.strerror(ffi.errno())))
+        logger.warn("Terminal: cannot open /dev/ptmx:", ffi.string(C.strerror(ffi.errno())))
         return false
     end
 
     if C.grantpt(ptmx) ~= 0 then
-        logger.warn("Terminal: can not grantpt:", ffi.string(C.strerror(ffi.errno())))
+        logger.warn("Terminal: cannot use grantpt:", ffi.string(C.strerror(ffi.errno())))
         C.close(ptmx)
         return false
     end
     if C.unlockpt(ptmx) ~= 0 then
-        logger.warn("Terminal: can not unlockpt:", ffi.string(C.strerror(ffi.errno())))
+        logger.warn("Terminal: cannot use unlockpt:", ffi.string(C.strerror(ffi.errno())))
         C.close(ptmx)
         return false
     end
@@ -58,7 +59,8 @@ end
 -- So sorry for the Tolinos with (Android 4.4.x).
 -- Maybe https://f-droid.org/de/packages/jackpal.androidterm/ could be an alternative then.
 if (Device:isAndroid() and Device.firmware_rev < 21) or not check_prerequisites() then
-    return
+    logger.warn("Terminal: Device doesn't meet some of the plugin's requirements")
+    return { disabled = true, }
 end
 
 local Aliases = require("aliases")
@@ -75,10 +77,11 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local TermInputText = require("terminputtext")
 local TextWidget = require("ui/widget/textwidget")
 local bit = require("bit")
+local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 local C_ = _.pgettext
-local T = require("ffi/util").template
+local T = ffiUtil.template
 
 local CHUNK_SIZE = 80 * 40 -- max. nb of read bytes (reduce this, if taps are not detected)
 
@@ -91,7 +94,44 @@ local Terminal = WidgetContainer:extend{
     terminal_data = ".",
 }
 
+function Terminal:isExecutable(file)
+    -- check if file is an executable or a command in PATH
+    return ffiUtil.isExecutable(file) or util.which(file) ~= nil
+end
+
+-- Try SHELL environment variable and some standard shells
+function Terminal:getDefaultShellExecutable()
+    if self.default_shell_executable then return self.default_shell_executable end
+
+    local shell = {
+        "bash",
+        "ash",
+        "sh",
+        "zsh",  -- RPROMPTs aren't really handled well, so we deprioritize it a bit
+        "dash",
+        "hush",
+        "ksh",
+        "mksh",
+    }
+    local env_shell = os.getenv("SHELL")
+    if env_shell then
+        table.insert(shell, 1, env_shell)
+    end
+
+    for dummy, file in ipairs(shell) do
+        if self:isExecutable(file) then
+            self.default_shell_executable = file
+            break
+        end
+    end
+    logger.dbg("Terminal: default shell is", self.default_shell_executable)
+
+    return self.default_shell_executable
+end
+
 function Terminal:init()
+    G_reader_settings:readSetting("terminal_shell", self:getDefaultShellExecutable())
+
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
 
@@ -110,8 +150,6 @@ function Terminal:spawnShell(cols, rows)
         return true
     end
 
-    local shell = G_reader_settings:readSetting("terminal_shell", "sh")
-
     local ptmx_name = "/dev/ptmx"
     self.ptmx = C.open(ptmx_name, bit.bor(C.O_RDWR, C.O_NONBLOCK, C.O_CLOEXEC))
 
@@ -126,7 +164,7 @@ function Terminal:spawnShell(cols, rows)
         return false
     end
     if C.unlockpt(self.ptmx) ~= 0 then
-        logger.err("Terminal: can not unockpt:", ffi.string(C.strerror(ffi.errno())))
+        logger.err("Terminal: can not unlockpt:", ffi.string(C.strerror(ffi.errno())))
         C.close(self.ptmx)
         return false
     end
@@ -142,6 +180,30 @@ function Terminal:spawnShell(cols, rows)
 
     logger.dbg("Terminal: slave_pty", self.slave_pty)
 
+    -- Prepare shell call
+    local function get_readline_wrapper()
+        if self:isExecutable("rlfe") then
+            return "rlfe"
+        elseif self:isExecutable("rlwrap") then
+            return "rlwrap"
+        end
+    end
+    local profile_file = "./plugins/terminal.koplugin/profile"
+    local rlw = get_readline_wrapper()
+    local shell = G_reader_settings:readSetting("terminal_shell")
+    local args = {}
+    if shell:find("bash") then
+        args = { "--rcfile", profile_file}
+    end
+
+    if not self:isExecutable(shell) then
+        UIManager:show(InfoMessage:new{
+            text = _("Shell is not executable"),
+        })
+        return false
+    end
+
+    logger.info("Terminal: spawning shell", shell)
     local pid = C.fork()
     if pid < 0 then
         logger.err("Terminal: fork failed:", ffi.string(C.strerror(ffi.errno())))
@@ -175,16 +237,20 @@ function Terminal:spawnShell(cols, rows)
         end
 
         C.setenv("TERM", "vt52", 1)
-        C.setenv("ENV", "./plugins/terminal.koplugin/profile", 1)
-        C.setenv("BASH_ENV", "./plugins/terminal.koplugin/profile", 1)
+        C.setenv("ENV", profile_file, 1) -- when bash is started as sh
+        C.setenv("BASH_ENV", profile_file, 1) -- when bash is started non-interactive
         C.setenv("TERMINAL_DATA", self.terminal_data, 1)
         if Device:isAndroid() then
             C.setenv("ANDROID", "ANDROID", 1)
         end
-        if C.execlp(shell, shell) ~= 0 then
+
+        -- Here we attempt to use an existing readline wrapper
+        if (rlw and C.execlp(rlw, rlw, shell, unpack(args)) ~= 0)
+            or C.execlp(shell, shell, unpack(args)) ~= 0 then
+
             -- the following two prints are shown in the terminal emulator.
             print("Terminal: something has gone really wrong in spawning the shell\n\n:-(\n")
-            print("Maybe an incorrect shell: '" .. shell .. "'\n")
+            print("Maybe an incorrect shell: '" .. shell .. "'\nor  an incorrect wrapper: " .. tostring(rlw) .. "'\n")
             os.exit()
         end
         os.exit()
@@ -391,6 +457,7 @@ function Terminal:generateInputDialog()
                             self.history = self.history:sub(1, #self.history - 1)
                         end
 
+                        UIManager:unschedule(Terminal.refresh)
                         UIManager:close(self.input_dialog)
                         if self.touchmenu_instance then
                             self.touchmenu_instance:updateItems()
@@ -400,6 +467,7 @@ function Terminal:generateInputDialog()
                     choice2_callback = function()
                         self.history = ""
                         self:killShell()
+                        UIManager:unschedule(Terminal.refresh)
                         UIManager:close(self.input_dialog)
                         if self.touchmenu_instance then
                             self.touchmenu_instance:updateItems()
@@ -414,7 +482,10 @@ function Terminal:generateInputDialog()
         end,
         strike_callback = function(chars)
             if self.ctrl and #chars == 1 then
-                chars = string.char(chars:upper():byte() - ("A"):byte()+1)
+                local n = chars:upper():byte() - ("A"):byte()+1
+                if n >= 0 then
+                    chars = string.char(n)
+                end
                 self.ctrl = false
             end
             if chars == "\n" then
@@ -521,7 +592,7 @@ Aliases (shortcuts) to frequently used commands can be placed in:
                     local cur_size = G_reader_settings:readSetting("terminal_font_size")
                     local size_spin = SpinWidget:new{
                         value = cur_size,
-                        value_min = 10,
+                        value_min = 8,
                         value_max = 30,
                         value_hold_step = 2,
                         default_value = 14,
@@ -561,14 +632,14 @@ Aliases (shortcuts) to frequently used commands can be placed in:
             },
             {
                 text_func = function()
-                    return T(_("Shell executable: %1"),
-                        G_reader_settings:readSetting("terminal_shell", "sh"))
+                    return T(_("Shell executable: %1"), G_reader_settings:readSetting("terminal_shell"))
                 end,
                 callback = function(touchmenu_instance)
                     self.shell_dialog = InputDialog:new{
                         title = _("Shell to use"),
-                        description = _("Here you can select the startup shell.\nDefault: sh"),
-                        input = G_reader_settings:readSetting("terminal_shell", "sh"),
+                        description = T(_("Here you can select the startup shell.\nDefault: %1"),
+                                      self:getDefaultShellExecutable()),
+                        input = G_reader_settings:readSetting("terminal_shell"),
                         buttons = {{
                             {
                                 text = _("Cancel"),
@@ -579,7 +650,7 @@ Aliases (shortcuts) to frequently used commands can be placed in:
                             {
                                 text = _("Default"),
                                 callback = function()
-                                    G_reader_settings:saveSetting("terminal_shell", "sh")
+                                    G_reader_settings:saveSetting("terminal_shell", self:getDefaultShellExecutable())
                                     UIManager:close(self.shell_dialog)
                                     if touchmenu_instance then
                                         touchmenu_instance:updateItems()
@@ -594,10 +665,16 @@ Aliases (shortcuts) to frequently used commands can be placed in:
                                     if new_shell == "" then
                                         new_shell = "sh"
                                     end
-                                    G_reader_settings:saveSetting("terminal_shell", new_shell)
-                                    UIManager:close(self.shell_dialog)
-                                    if touchmenu_instance then
-                                        touchmenu_instance:updateItems()
+                                    if self:isExecutable(new_shell) then
+                                        G_reader_settings:saveSetting("terminal_shell", new_shell)
+                                        UIManager:close(self.shell_dialog)
+                                        if touchmenu_instance then
+                                            touchmenu_instance:updateItems()
+                                        end
+                                    else
+                                        UIManager:show(InfoMessage:new{
+                                            text = _("Shell is not executable"),
+                                        })
                                     end
                                 end
                             },

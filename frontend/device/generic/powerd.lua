@@ -18,6 +18,7 @@ local BasePowerD = {
     last_aux_capacity_pull_time = time.s(-61),  -- timestamp of last pull
 
     is_fl_on = false,                 -- whether the frontlight is on
+    fl_was_on = nil,                  -- whether the frontlight *was* on before suspend
 }
 
 function BasePowerD:new(o)
@@ -29,6 +30,7 @@ function BasePowerD:new(o)
     if o.device and o.device:hasFrontlight() then
         o.fl_intensity = o:frontlightIntensityHW()
         o:_decideFrontlightState()
+        o:updateResumeFrontlightState()
     end
     --- @note: Post-init, as the min/max values may be computed at runtime on some platforms
     assert(o.fl_warmth_min < o.fl_warmth_max)
@@ -43,7 +45,10 @@ function BasePowerD:new(o)
 end
 
 function BasePowerD:init() end
-function BasePowerD:setIntensityHW(intensity) end
+--- @note: This should *always* call self:_decideFrontlightState() in its coda (unless you have a custom isFrontlightOn implementation)!
+function BasePowerD:setIntensityHW(intensity)
+    self:_decideFrontlightState()
+end
 --- @note: Unlike the "public" setWarmth, this one takes a value in the *native* scale!
 function BasePowerD:setWarmthHW(warmth) end
 function BasePowerD:getCapacityHW() return 0 end
@@ -107,6 +112,11 @@ end
 function BasePowerD:_decideFrontlightState()
     assert(self.device:hasFrontlight())
     self.is_fl_on = self:isFrontlightOnHW()
+end
+
+-- Separate from _decideFrontlightState, as this is only called by *interactive* codepaths
+function BasePowerD:updateResumeFrontlightState()
+    self.fl_was_on = self:isFrontlightOn()
 end
 
 function BasePowerD:isFrontlightOff()
@@ -207,7 +217,6 @@ function BasePowerD:setIntensity(intensity)
     if not self.device:hasFrontlight() then return false end
     if intensity == self:frontlightIntensity() then return false end
     self.fl_intensity = self:normalizeIntensity(intensity)
-    self:_decideFrontlightState()
     logger.dbg("set light intensity", self.fl_intensity)
     self:setIntensityHW(self.fl_intensity)
     self:stateChanged()
