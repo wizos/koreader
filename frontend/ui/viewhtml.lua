@@ -5,7 +5,6 @@ It it used by ReaderHighlight as an action after text selection.
 
 local BD = require("ui/bidi")
 local Device = require("device")
-local Font = require("ui/font")
 local InfoMessage = require("ui/widget/infomessage")
 local Notification = require("ui/widget/notification")
 local TextViewer = require("ui/widget/textviewer")
@@ -30,7 +29,7 @@ local ViewHtml = {
 
         -- Or additionally show unicode codepoint of each char
         { _("Switch to unicode debug view"), 0xEB5E, true },
-    }
+    },
 }
 
 -- Main entry point
@@ -124,8 +123,7 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
                     cssviewer = TextViewer:new{
                         title = css_files[i],
                         text = css_text or _("Failed getting CSS content"),
-                        text_face = Font:getFace("smallinfont"),
-                        justified = false,
+                        text_type = "code",
                         para_direction_rtl = false,
                         auto_para_direction = false,
                         add_default_buttons = true,
@@ -138,8 +136,7 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
                                     UIManager:show(TextViewer:new{
                                         title = css_files[i],
                                         text = util.prettifyCSS(css_text),
-                                        text_face = Font:getFace("smallinfont"),
-                                        justified = false,
+                                        text_type = "code",
                                         para_direction_rtl = false,
                                         auto_para_direction = false,
                                     })
@@ -185,8 +182,7 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
     textviewer = TextViewer:new{
         title = _("Selection HTML"),
         text = html,
-        text_face = Font:getFace("smallinfont"),
-        justified = false,
+        text_type = "code",
         para_direction_rtl = false,
         auto_para_direction = false,
         add_default_buttons = true,
@@ -312,7 +308,7 @@ function ViewHtml:_handleLongPress(document, css_selectors_offsets, offset_shift
                         ancestors_classnames_selector = " > " .. ancestors_classnames_selector
                     end
                     ancestors_classnames_selector = elem .. all_classnames .. ancestors_classnames_selector
-                    seen_kind.element = true -- done with selectors targetting the selected element only
+                    seen_kind.element = true -- done with selectors targeting the selected element only
                 end
                 if elem == "DocFragment" or elem == "FictionBook" then
                     -- Ignore the root node up these
@@ -375,8 +371,8 @@ function ViewHtml:_handleLongPress(document, css_selectors_offsets, offset_shift
         end,
     }})
 
-    local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-    local widget = ButtonDialogTitle:new{
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local widget = ButtonDialog:new{
         title = _("Copy to clipboard:"),
         title_align = "center",
         width_factor = 0.8,
@@ -420,8 +416,7 @@ function ViewHtml:_showMatchingSelectors(document, ancestors, show_all_ancestors
     cssviewer = TextViewer:new{
         title = title,
         text = css_text or _("No matching rulesets"),
-        text_face = Font:getFace("smallinfont"),
-        justified = false,
+        text_type = "code",
         para_direction_rtl = false,
         auto_para_direction = false,
         add_default_buttons = true,
@@ -434,8 +429,7 @@ function ViewHtml:_showMatchingSelectors(document, ancestors, show_all_ancestors
                     UIManager:show(TextViewer:new{
                         title = title,
                         text = util.prettifyCSS(css_text),
-                        text_face = Font:getFace("smallinfont"),
-                        justified = false,
+                        text_type = "code",
                         para_direction_rtl = false,
                         auto_para_direction = false,
                     })

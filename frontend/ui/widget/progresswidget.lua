@@ -60,13 +60,13 @@ local ProgressWidget = Widget:extend{
     _orig_margin_v = nil,
     _orig_bordersize = nil,
     initial_pos_marker = false, -- overlay a marker at the initial percentage position
-    inital_percentage = nil,
+    initial_percentage = nil,
 }
 
 function ProgressWidget:init()
     if self.initial_pos_marker then
-        if not self.inital_percentage then
-            self.inital_percentage = self.percentage
+        if not self.initial_percentage then
+            self.initial_percentage = self.percentage
         end
 
         self:renderMarkerIcon()
@@ -110,11 +110,16 @@ end
 
 function ProgressWidget:paintTo(bb, x, y)
     local my_size = self:getSize()
-    self.dimen = Geom:new{
-        x = x, y = y,
-        w = my_size.w,
-        h = my_size.h
-    }
+    if not self.dimen then
+        self.dimen = Geom:new{
+            x = x, y = y,
+            w = my_size.w,
+            h = my_size.h
+        }
+    else
+        self.dimen.x = x
+        self.dimen.y = y
+    end
     if self.dimen.w == 0 or self.dimen.h == 0 then return end
 
     local _mirroredUI = BD.mirroredUILayout()
@@ -136,7 +141,7 @@ function ProgressWidget:paintTo(bb, x, y)
         -- Otherwise, we have to start with the background.
         bb:paintRoundedRect(x, y, my_size.w, my_size.h, self.bgcolor, self.radius)
         -- Then the border around that.
-        bb:paintBorder(x, y,
+        bb:paintBorder(math.floor(x), math.floor(y),
                        my_size.w, my_size.h,
                        self.bordersize, self.bordercolor, self.radius)
     end
@@ -177,11 +182,11 @@ function ProgressWidget:paintTo(bb, x, y)
                      self.fillcolor)
 
         -- Overlay the initial position marker on top of that
-        if self.initial_pos_marker then
+        if self.initial_pos_marker and self.initial_percentage >= 0 then
             if self.height <= INITIAL_MARKER_HEIGHT_THRESHOLD then
-                self.initial_pos_icon:paintTo(bb, Math.round(fill_x + math.ceil(fill_width * self.inital_percentage) - self.height / 4), y - Math.round(self.height / 6))
+                self.initial_pos_icon:paintTo(bb, Math.round(fill_x + math.ceil(fill_width * self.initial_percentage) - self.height / 4), y - Math.round(self.height / 6))
             else
-                self.initial_pos_icon:paintTo(bb, Math.round(fill_x + math.ceil(fill_width * self.inital_percentage) - self.height / 2), y)
+                self.initial_pos_icon:paintTo(bb, Math.round(fill_x + math.ceil(fill_width * self.initial_percentage) - self.height / 2), y)
             end
         end
     end
@@ -207,8 +212,8 @@ end
 function ProgressWidget:setPercentage(percentage)
     self.percentage = percentage
     if self.initial_pos_marker then
-        if not self.inital_percentage then
-            self.inital_percentage = self.percentage
+        if not self.initial_percentage then
+            self.initial_percentage = self.percentage
         end
     end
 end

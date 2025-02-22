@@ -28,12 +28,7 @@ function ReaderGoto:addToMainMenu(menu_items)
 end
 
 function ReaderGoto:onShowGotoDialog()
-    local curr_page
-    if self.document.info.has_pages then
-        curr_page = self.ui.paging.current_page
-    else
-        curr_page = self.document:getCurrentPage()
-    end
+    local curr_page = self.ui:getCurrentPage()
     local input_hint
     if self.ui.pagemap and self.ui.pagemap:wantsPageLabels() then
         input_hint = T("@%1 (%2 - %3)", self.ui.pagemap:getCurrentPageLabel(true),
@@ -46,6 +41,7 @@ function ReaderGoto:onShowGotoDialog()
     self.goto_dialog = InputDialog:new{
         title = _("Enter page number or percentage"),
         input_hint = input_hint,
+        input_type = "number",
         description = self.document:hasHiddenFlows() and
             _([[
 x for an absolute page number
@@ -58,16 +54,7 @@ x for an absolute page number
                     text = _("Skim"),
                     callback = function()
                         self:close()
-                        self.skimto = SkimToWidget:new{
-                            document = self.document,
-                            ui = self.ui,
-                            callback_switch_to_goto = function()
-                                UIManager:close(self.skimto)
-                                self:onShowGotoDialog()
-                            end,
-                        }
-                        UIManager:show(self.skimto)
-
+                        self:onShowSkimtoDialog()
                     end,
                 },
                 {
@@ -94,7 +81,6 @@ x for an absolute page number
                 }
             },
         },
-        input_type = "number",
     }
     UIManager:show(self.goto_dialog)
     self.goto_dialog:onShowKeyboard()
@@ -102,7 +88,6 @@ end
 
 function ReaderGoto:onShowSkimtoDialog()
     self.skimto = SkimToWidget:new{
-        document = self.document,
         ui = self.ui,
         callback_switch_to_goto = function()
             UIManager:close(self.skimto)
@@ -193,6 +178,30 @@ function ReaderGoto:onGoToEnd()
         self.ui:handleEvent(Event:new("GotoPage", new_page))
     end
     return true
+end
+
+function ReaderGoto:onGoToRandomPage()
+    local page_count = self.document:getPageCount()
+    if page_count == 1 then return true end
+    local current_page = self.ui:getCurrentPage()
+    if self.pages_pool == nil then
+        self.pages_pool = {}
+    end
+    if #self.pages_pool == 0 or (#self.pages_pool == 1 and self.pages_pool[1] == current_page) then
+        for i = 1, page_count do
+            self.pages_pool[i] = i
+        end
+    end
+    while true do
+        local random_page_idx = math.random(1, #self.pages_pool)
+        local random_page = self.pages_pool[random_page_idx]
+        if random_page ~= current_page then
+            table.remove(self.pages_pool, random_page_idx)
+            self.ui.link:addCurrentLocationToStack()
+            self.ui:handleEvent(Event:new("GotoPage", random_page))
+            return true
+        end
+    end
 end
 
 return ReaderGoto

@@ -82,7 +82,8 @@ function FrontLightWidget:init()
 
     -- Input
     if Device:hasKeys() then
-        self.key_events.Close = { { Device.input.group.Back } }
+      local close_keys = Device:hasFewKeys() and { Device.input.group.Back, "Left" } or Device.input.group.Back
+      self.key_events.Close = { { close_keys } }
     end
     if Device:isTouchDevice() then
         self.ges_events = {
@@ -511,6 +512,7 @@ function FrontLightWidget:setFrontLightIntensity(intensity)
     else
         self.powerd:setIntensity(self.fl.cur)
     end
+    self.powerd:updateResumeFrontlightState()
 
     -- Retrieve the real level set by PowerD (will be different from `intensity` on toggle)
     self.fl.cur = self.powerd:frontlightIntensity()

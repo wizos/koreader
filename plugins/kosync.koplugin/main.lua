@@ -84,7 +84,7 @@ function KOSync:init()
     self.device_id = G_reader_settings:readSetting("device_id")
 
     -- Disable auto-sync if beforeWifiAction was reset to "prompt" behind our back...
-    if self.settings.auto_sync and Device:hasWifiToggle() and G_reader_settings:readSetting("wifi_enable_action") ~= "turn_on" then
+    if self.settings.auto_sync and Device:hasSeamlessWifiToggle() and G_reader_settings:readSetting("wifi_enable_action") ~= "turn_on" then
         self.settings.auto_sync = false
         logger.warn("KOSync: Automatic sync has been disabled because wifi_enable_action is *not* turn_on")
     end
@@ -169,16 +169,14 @@ function KOSync:onDispatcherRegisterActions()
 end
 
 function KOSync:onReaderReady()
-    -- Make sure checksum has been calculated before we ever query it,
-    -- to prevent document saving features from affecting the checksum,
-    -- and eventually affecting the document identity for the progress sync feature.
-    self.view.document:fastDigest(self.ui.doc_settings)
-
     if self.settings.auto_sync then
         UIManager:nextTick(function()
             self:getProgress(true, false)
         end)
     end
+    -- NOTE: Keep in mind that, on Android, turning on WiFi requires a focus switch, which will trip a Suspend/Resume pair.
+    --       NetworkMgr will attempt to hide the damage to avoid a useless pull -> push -> pull dance instead of the single pull requested.
+    --       Plus, if wifi_enable_action is set to prompt, that also avoids stacking three prompts on top of each other...
     self:registerEvents()
     self:onDispatcherRegisterActions()
 
@@ -197,7 +195,6 @@ function KOSync:addToMainMenu(menu_items)
                         -- @translators Server address defined by user for progress sync.
                         title = _("Custom progress sync server address"),
                         input = self.settings.custom_server or "https://",
-                        type = "text",
                         callback = function(input)
                             self:setCustomServer(input)
                         end,
@@ -229,7 +226,7 @@ function KOSync:addToMainMenu(menu_items)
                 help_text = _([[This may lead to nagging about toggling WiFi on document close and suspend/resume, depending on the device's connectivity.]]),
                 callback = function()
                     -- Actively recommend switching the before wifi action to "turn_on" instead of prompt, as prompt will just not be practical (or even plain usable) here.
-                    if Device:hasWifiToggle() and G_reader_settings:readSetting("wifi_enable_action") ~= "turn_on" and not self.settings.auto_sync then
+                    if Device:hasSeamlessWifiToggle() and G_reader_settings:readSetting("wifi_enable_action") ~= "turn_on" and not self.settings.auto_sync then
                         UIManager:show(InfoMessage:new{ text = _("You will have to switch the 'Action when Wi-Fi is off' Network setting to 'turn on' to be able to enable this feature!") })
                         return
                     end
@@ -450,6 +447,7 @@ function KOSync:login(menu)
                     text = _("Login"),
                     callback = function()
                         local username, password = unpack(dialog:getFields())
+                        username = util.trim(username)
                         local ok, err = validateUser(username, password)
                         if not ok then
                             UIManager:show(InfoMessage:new{
@@ -472,6 +470,7 @@ function KOSync:login(menu)
                     text = _("Register"),
                     callback = function()
                         local username, password = unpack(dialog:getFields())
+                        username = util.trim(username)
                         local ok, err = validateUser(username, password)
                         if not ok then
                             UIManager:show(InfoMessage:new{
@@ -629,7 +628,7 @@ function KOSync:syncToProgress(progress)
     end
 end
 
-function KOSync:updateProgress(ensure_networking, interactive, refresh_on_success)
+function KOSync:updateProgress(ensure_networking, interactive, on_suspend)
     if not self.settings.username or not self.settings.userkey then
         if interactive then
             promptLogin()
@@ -643,7 +642,7 @@ function KOSync:updateProgress(ensure_networking, interactive, refresh_on_succes
         return
     end
 
-    if ensure_networking and NetworkMgr:willRerunWhenOnline(function() self:updateProgress(ensure_networking, interactive, refresh_on_success) end) then
+    if ensure_networking and NetworkMgr:willRerunWhenOnline(function() self:updateProgress(ensure_networking, interactive, on_suspend) end) then
         return
     end
 
@@ -682,8 +681,8 @@ function KOSync:updateProgress(ensure_networking, interactive, refresh_on_succes
         if interactive then showSyncError() end
         if err then logger.dbg("err:", err) end
     else
-        -- This is solely for onSuspend's sake, to clear the ghosting left by the the "Connected" InfoMessage
-        if refresh_on_success then
+        -- This is solely for onSuspend's sake, to clear the ghosting left by the "Connected" InfoMessage
+        if on_suspend then
             -- Our top-level widget should be the "Connected to network" InfoMessage from NetworkMgr's reconnectOrShowNetworkMenu
             local widget = UIManager:getTopmostVisibleWidget()
             if widget and widget.modal and widget.tag == "NetworkMgr" and not widget.dismiss_callback then
@@ -693,6 +692,15 @@ function KOSync:updateProgress(ensure_networking, interactive, refresh_on_succes
                     UIManager:setDirty(nil, "full")
                 end
             end
+        end
+    end
+
+    if on_suspend then
+        -- NOTE: We want to murder Wi-Fi once we're done in this specific case (i.e., Suspend),
+        --       because some of our hasWifiManager targets will horribly implode when attempting to suspend with the Wi-Fi chip powered on,
+        --       and they'll have attempted to kill Wi-Fi well before *we* run (e.g., in `Device:onPowerEvent`, *before* actually sending the Suspend Event)...
+        if Device:hasWifiManager() then
+            NetworkMgr:disableWifi()
         end
     end
 
@@ -831,6 +839,10 @@ end
 
 function KOSync:_onCloseDocument()
     logger.dbg("KOSync: onCloseDocument")
+    -- NOTE: Because everything is terrible, on Android, opening the system settings to enable WiFi means we lose focus,
+    --       and we handle those system focus events via... Suspend & Resume events, so we need to neuter those handlers early.
+    self.onResume = nil
+    self.onSuspend = nil
     -- NOTE: Because we'll lose the document instance on return, we need to *block* until the connection is actually up here,
     --       we cannot rely on willRerunWhenOnline, because if we're not currently online,
     --       it *will* return early, and that means the actual callback *will* run *after* teardown of the document instance

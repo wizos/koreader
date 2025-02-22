@@ -50,7 +50,7 @@ local function getLinkOpener()
     return false
 end
 
--- thirdparty app support
+-- third-party app support
 local external = require("device/thirdparty"):new{
     dicts = getDesktopDicts(),
     check = function(self, app)
@@ -68,8 +68,10 @@ local Device = Generic:extend{
     hasBattery = SDL.getPowerInfo,
     hasKeyboard = yes,
     hasKeys = yes,
+    hasSymKey = os.getenv("DISABLE_TOUCH") == "1" and yes or no,
     hasDPad = yes,
     hasWifiToggle = no,
+    hasSeamlessWifiToggle = no,
     isTouchDevice = yes,
     isDefaultFullscreen = no,
     needsScreenRefreshAfterResume = no,
@@ -106,9 +108,15 @@ local Device = Generic:extend{
     window = G_reader_settings:readSetting("sdl_window", {}),
 }
 
+function Device:otaModel()
+    if self.ota_model then
+        return self.ota_model, "link"
+    end
+end
+
 local AppImage = Device:extend{
     model = "AppImage",
-    hasMultitouch = no,
+    ota_model = "appimage",
     hasOTAUpdates = yes,
     isDesktop = yes,
 }
@@ -118,6 +126,12 @@ local Desktop = Device:extend{
     isDesktop = yes,
     canRestart = notOSX,
     hasExitOptions = notOSX,
+}
+
+local Flatpak = Device:extend{
+    model = "Flatpak",
+    isDesktop = yes,
+    canExternalDictLookup = no,
 }
 
 local Emulator = Device:extend{
@@ -171,7 +185,7 @@ function Device:init()
         y = self.window.top,
         is_always_portrait = self.isAlwaysPortrait(),
     }
-    -- Pickup the updated window sizes if they were enforced in S.open (we'll get the coordinates via the inital SDL_WINDOWEVENT_MOVED)...
+    -- Pickup the updated window sizes if they were enforced in S.open (we'll get the coordinates via the initial SDL_WINDOWEVENT_MOVED)...
     self.window.width = self.screen.w
     self.window.height = self.screen.h
     self.powerd = require("device/sdl/powerd"):new{device = self}
@@ -179,10 +193,9 @@ function Device:init()
     local ok, re = pcall(self.screen.setWindowIcon, self.screen, "resources/koreader.png")
     if not ok then logger.warn(re) end
 
-    local input = require("ffi/input")
     self.input = require("device/input"):new{
         device = self,
-        event_map = require("device/sdl/event_map_sdl2"),
+        event_map = dofile("frontend/device/sdl/event_map_sdl2.lua"),
         handleSdlEv = function(device_input, ev)
 
 
@@ -230,12 +243,12 @@ function Device:init()
                 local fake_release_ev = Event:new("Gesture", fake_ges_release)
                 if scrolled_y == down then
                     fake_ges.direction = "north"
-                    UIManager:broadcastEvent(fake_pan_ev)
-                    UIManager:broadcastEvent(fake_release_ev)
+                    UIManager:sendEvent(fake_pan_ev)
+                    UIManager:sendEvent(fake_release_ev)
                 elseif scrolled_y == up then
                     fake_ges.direction = "south"
-                    UIManager:broadcastEvent(fake_pan_ev)
-                    UIManager:broadcastEvent(fake_release_ev)
+                    UIManager:sendEvent(fake_pan_ev)
+                    UIManager:sendEvent(fake_release_ev)
                 end
             elseif ev.code == SDL_MULTIGESTURE then
                 -- no-op for now
@@ -272,6 +285,9 @@ function Device:init()
                     FileManager.instance:reinit(FileManager.instance.path,
                         FileManager.instance.focused_file)
                 end
+
+                -- make sure dialogs are displayed
+                UIManager:setDirty("all", "ui")
             elseif ev.code == SDL_WINDOWEVENT_MOVED then
                 self.window.left = ev.value.data1
                 self.window.top = ev.value.data2
@@ -279,22 +295,9 @@ function Device:init()
                 UIManager:sendEvent(Event:new("TextInput", tostring(ev.value)))
             end
         end,
-        hasClipboardText = function()
-            return input.hasClipboardText()
-        end,
-        getClipboardText = function()
-            return input.getClipboardText()
-        end,
-        setClipboardText = function(text)
-            return input.setClipboardText(text)
-        end,
-        gameControllerRumble = function(left_intensity, right_intensity, duration)
-            return input.gameControllerRumble(left_intensity, right_intensity, duration)
-        end,
-        file_chooser = input.file_chooser,
     }
 
-    self.keyboard_layout = require("device/sdl/keyboard_layout")
+    self.keyboard_layout = dofile("frontend/device/sdl/keyboard_layout.lua")
 
     if self.input.gameControllerRumble(0, 0, 0) then
         self.isHapticFeedbackEnabled = yes
@@ -379,6 +382,11 @@ end
 function Device:initNetworkManager(NetworkMgr)
     function NetworkMgr:isWifiOn() return true end
     function NetworkMgr:isConnected()
+        if not Device:hasWifiToggle() then
+            -- NOTE: This is necessary so as not to confuse NetworkMghr's beforeWifiAction framework.
+            --       c.f., the default implementation in `NetworkMgr` itself for more details.
+            return true
+        end
         -- Pull the default gateway first, so we don't even try to ping anything if there isn't one...
         local default_gw = Device:getDefaultRoute()
         if not default_gw then
@@ -407,20 +415,23 @@ end
 
 -- fake network manager for the emulator
 function Emulator:initNetworkManager(NetworkMgr)
-    local connectionChangedEvent = function()
+    local connectionChangedEvent = function(complete_callback)
         if G_reader_settings:nilOrTrue("emulator_fake_wifi_connected") then
             UIManager:broadcastEvent(Event:new("NetworkConnected"))
         else
             UIManager:broadcastEvent(Event:new("NetworkDisconnected"))
         end
+        if complete_callback then
+            complete_callback()
+        end
     end
     function NetworkMgr:turnOffWifi(complete_callback)
         G_reader_settings:flipNilOrTrue("emulator_fake_wifi_connected")
-        UIManager:scheduleIn(2, connectionChangedEvent)
+        UIManager:scheduleIn(2, connectionChangedEvent, complete_callback)
     end
     function NetworkMgr:turnOnWifi(complete_callback)
         G_reader_settings:flipNilOrTrue("emulator_fake_wifi_connected")
-        UIManager:scheduleIn(2, connectionChangedEvent)
+        UIManager:scheduleIn(2, connectionChangedEvent, complete_callback)
     end
     function NetworkMgr:isWifiOn()
         return G_reader_settings:nilOrTrue("emulator_fake_wifi_connected")
@@ -433,6 +444,8 @@ io.write("Starting SDL in " .. SDL.getBasePath() .. "\n")
 -------------- device probe ------------
 if os.getenv("APPIMAGE") then
     return AppImage
+elseif os.getenv("FLATPAK") then
+    return Flatpak
 elseif os.getenv("KO_MULTIUSER") then
     return Desktop
 elseif os.getenv("UBUNTU_APPLICATION_ISOLATION") then

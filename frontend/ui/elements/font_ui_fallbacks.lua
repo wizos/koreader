@@ -39,7 +39,8 @@ local genFallbackCandidates = function()
         local fontinfo = FontList.fontinfo[font_path] -- (NotoColorEmoji.tff happens to get no fontinfo)
         if fontinfo and #fontinfo == 1 then -- Ignore font files with multiple faces
             fontinfo = fontinfo[1]
-            if util.stringStartsWith(fontinfo.name, "Noto Sans ") and
+            if (util.stringStartsWith(fontinfo.name, "Noto Sans ") or
+                        fontinfo.name == "Noto Emoji") and
                         not fontinfo.bold and not fontinfo.italic and
                         not fontinfo.serif and not fontinfo.mono then
                 fallback_candidates[fontinfo.name] = fontinfo
@@ -49,13 +50,13 @@ local genFallbackCandidates = function()
     end
 end
 
-local more_info_text = _([[
-If some book titles, dictionary entries and such are not displayed well but shown as ￾￾ or ��, it may be necessary to download the required fonts for those languages. They can then be enabled as additional UI fallback fonts.
+local more_info_text = T(_([[
+If some book titles, dictionary entries and such are not displayed well but shown as %1 or %2, it may be necessary to download the required fonts for those languages. They can then be enabled as additional UI fallback fonts.
 Fonts for many languages can be downloaded at:
 
 https://fonts.google.com/noto
 
-Only fonts named "Noto Sans xyz" or "Noto Sans xyz UI" (regular, not bold nor italic, not Serif) will be available in this menu. However, bold fonts will be used if their corresponding regular fonts exist.]])
+Only fonts named "Noto Sans xyz" or "Noto Sans xyz UI" (regular, not bold nor italic, not Serif) will be available in this menu. However, bold fonts will be used if their corresponding regular fonts exist.]]), "￾￾", "��")
 
 local getSubMenuItems = function()
     genFallbackCandidates()

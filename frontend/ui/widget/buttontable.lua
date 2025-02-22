@@ -66,6 +66,7 @@ function ButtonTable:init()
             local button = Button:new{
                 text = btn_entry.text,
                 text_func = btn_entry.text_func,
+                checked_func = btn_entry.checked_func,
                 lang = btn_entry.lang,
                 icon = btn_entry.icon,
                 icon_width = btn_entry.icon_width,
@@ -83,6 +84,7 @@ function ButtonTable:init()
                 allow_hold_when_disabled = btn_entry.allow_hold_when_disabled,
                 vsync = btn_entry.vsync,
                 width = btn_entry.width or default_button_width,
+                height = btn_entry.height,
                 bordersize = 0,
                 margin = 0,
                 padding = Size.padding.buttontable, -- a bit taller than standalone buttons, for easier tap
@@ -92,6 +94,7 @@ function ButtonTable:init()
                 text_font_face = btn_entry.font_face,
                 text_font_size = btn_entry.font_size,
                 text_font_bold = btn_entry.font_bold,
+                menu_style = btn_entry.menu_style,
                 show_parent = self.show_parent,
             }
             if self.shrink_unneeded_width and not btn_entry.width and min_needed_button_width ~= false then
@@ -114,7 +117,7 @@ function ButtonTable:init()
             end
             local button_dim = button:getSize()
             local vertical_sep = LineWidget:new{
-                background = Blitbuffer.COLOR_GRAY,
+                background = btn_entry.no_vertical_sep and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_GRAY,
                 dimen = Geom:new{
                     w = self.sep_width,
                     h = button_dim.h,
@@ -220,7 +223,7 @@ function ButtonTable:getStepScrollGrid()
         local row_num = 1
         while idx <= #self.container do
             local row = {
-                row_num = row_num, -- (not used, but may help with debugging)
+                row_num = row_num, -- (used by ScrollableContainer, and generally helpful for debugging)
                 top = offsets[idx].y, -- top of our vspan above text
                 content_top = offsets[idx+1].y, -- top of our text widget
                 content_bottom = offsets[idx+2].y - 1, -- bottom of our text widget

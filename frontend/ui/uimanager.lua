@@ -42,6 +42,7 @@ local UIManager = {
     _gated_quit = nil,
     _prevent_standby_count = 0,
     _prev_prevent_standby_count = 0,
+    _input_gestures_disabled = false,
 
     event_hook = require("ui/hook_container"):new()
 }
@@ -61,16 +62,21 @@ function UIManager:init()
         UsbDevicePlugIn = function(input_event)
             -- Retrieve the argument set by Input:handleKeyBoardEv
             local evdev = table.remove(Input.fake_event_args[input_event])
-            self:broadcastEvent(Event:new("EvdevInputInsert", evdev))
+            local path = "/dev/input/event" .. tostring(evdev)
+
+            self:broadcastEvent(Event:new("EvdevInputInsert", path))
         end,
         UsbDevicePlugOut = function(input_event)
             local evdev = table.remove(Input.fake_event_args[input_event])
-            self:broadcastEvent(Event:new("EvdevInputRemove", evdev))
+            local path = "/dev/input/event" .. tostring(evdev)
+
+            self:broadcastEvent(Event:new("EvdevInputRemove", path))
         end,
     }
     self.poweroff_action = function()
         self._entered_poweroff_stage = true
         logger.info("Powering off the device...")
+        self:broadcastEvent(Event:new("PowerOff"))
         self:broadcastEvent(Event:new("Close"))
         local Screensaver = require("ui/screensaver")
         Screensaver:setup("poweroff", _("Powered off"))
@@ -88,6 +94,7 @@ function UIManager:init()
     self.reboot_action = function()
         self._entered_poweroff_stage = true
         logger.info("Rebooting the device...")
+        self:broadcastEvent(Event:new("Reboot"))
         self:broadcastEvent(Event:new("Close"))
         local Screensaver = require("ui/screensaver")
         Screensaver:setup("reboot", _("Rebooting…"))
@@ -109,6 +116,12 @@ function UIManager:init()
     -- A simple wrapper for UIManager:quit()
     -- This may be overwritten by setRunForeverMode(); for testing purposes
     self:unsetRunForeverMode()
+end
+
+-- Crappy wrapper because of circular dependencies
+function UIManager:setIgnoreTouchInput(state)
+    local InputContainer = require("ui/widget/container/inputcontainer")
+    InputContainer:setIgnoreTouchInput(state)
 end
 
 --[[--
@@ -163,6 +176,13 @@ function UIManager:show(widget, refreshtype, refreshregion, x, y, refreshdither)
     Input.disable_double_tap = widget.disable_double_tap ~= false
     -- a widget may override tap interval (when it doesn't, nil restores the default)
     Input.tap_interval_override = widget.tap_interval_override
+    -- If input was disabled, re-enable it while this widget is shown so we can actually interact with it.
+    -- The only thing that could actually call show in this state is something automatic, so we need to be able to deal with it.
+    if UIManager._input_gestures_disabled then
+        logger.dbg("Gestures were disabled, temporarily re-enabling them to allow interaction with widget")
+        self:setIgnoreTouchInput(false)
+        widget._restored_input_gestures = true
+    end
 end
 
 --[[--
@@ -242,6 +262,10 @@ function UIManager:close(widget, refreshtype, refreshregion, refreshdither)
             self:setDirty(self._window_stack[i].widget)
         end
         self:_refresh(refreshtype, refreshregion, refreshdither)
+    end
+    if widget._restored_input_gestures then
+        logger.dbg("Widget is gone, disabling gesture handling again")
+        self:setIgnoreTouchInput(true)
     end
 end
 
@@ -657,21 +681,6 @@ dbg:guard(UIManager, 'setDirty',
     end)
 --]]
 
---[[--
-Clear the full repaint & refresh queues.
-
-NOTE: Beware! This doesn't take any prisonners!
-You shouldn't have to resort to this unless in very specific circumstances!
-plugins/coverbrowser.koplugin/covermenu.lua building a franken-menu out of buttondialogtitle & buttondialog
-and wanting to avoid inheriting their original paint/refresh cycle being a prime example.
---]]
-function UIManager:clearRenderStack()
-    logger.dbg("clearRenderStack: Clearing the full render stack!")
-    self._dirty = {}
-    self._refresh_func_stack = {}
-    self._refresh_stack = {}
-end
-
 function UIManager:insertZMQ(zeromq)
     table.insert(self._zeromqs, zeromq)
     return zeromq
@@ -743,7 +752,7 @@ end
 
 --- Top-to-bottom widgets iterator
 --- NOTE: VirtualKeyboard can be instantiated multiple times, and is a modal,
---        so don't be suprised if you find a couple of instances of it at the top ;).
+--        so don't be surprised if you find a couple of instances of it at the top ;).
 function UIManager:topdown_widgets_iter()
     local n = #self._window_stack
     local i = n + 1
@@ -1094,23 +1103,21 @@ UIManager that a certain part of the screen is to be refreshed.
 ]]
 function UIManager:_refresh(mode, region, dither)
     if not mode then
-        -- If we're trying to float a dither hint up from a lower widget after a close, mode might be nil...
-        -- So use the lowest priority refresh mode (short of fast, because that'd do half-toning).
-        if dither then
-            mode = "ui"
-        else
-            -- Otherwise, this is most likely from a `show` or `close` that wasn't passed specific refresh details,
-            -- (which is the vast majority of them), in which case we drop it to avoid enqueuing a useless full-screen refresh.
-            return
-        end
+        -- This is most likely from a `show` or `close` that wasn't passed specific refresh details,
+        -- (which is the vast majority of them), in which case we drop it to avoid enqueuing a useless full-screen refresh.
+        return
     end
+
     -- Downgrade all refreshes to "fast" when ReaderPaging or ReaderScrolling have set this flag
     if self.currently_scrolling then
         mode = "fast"
     end
+
+    -- Reset the refresh counter on any explicit full refresh
     if not region and mode == "full" then
-        self.refresh_count = 0 -- reset counter on explicit full refresh
+        self.refresh_count = 0
     end
+
     -- Handle downgrading flashing modes to non-flashing modes, according to user settings.
     -- NOTE: Do it before "full" promotion and collision checks/update_mode.
     if G_reader_settings:isTrue("avoid_flashing_ui") then
@@ -1127,7 +1134,7 @@ function UIManager:_refresh(mode, region, dither)
     end
     -- special case: "partial" refreshes
     -- will get promoted every self.FULL_REFRESH_COUNT refreshes
-    -- since _refresh can be called mutiple times via setDirty called in
+    -- since _refresh can be called multiple times via setDirty called in
     -- different widgets before a real screen repaint, we should make sure
     -- refresh_count is incremented by only once at most for each repaint
     -- NOTE: Ideally, we'd only check for "partial"" w/ no region set (that neatly narrows it down to just the reader).
@@ -1150,7 +1157,7 @@ function UIManager:_refresh(mode, region, dither)
     end
 
     -- if no region is specified, use the screen's dimensions
-    region = region or Geom:new{w=Screen:getWidth(), h=Screen:getHeight()}
+    region = region or Geom:new{x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight()}
 
     -- if no dithering hint was specified, don't request dithering
     dither = dither or false
@@ -1161,9 +1168,9 @@ function UIManager:_refresh(mode, region, dither)
     --       as well as a few actually effective merges
     --       (e.g., the disappearance of a selection HL with the following menu update).
     for i, refresh in ipairs(self._refresh_stack) do
-        -- Check for collision with refreshes that are already enqueued
-        -- NOTE: intersect *means* intersect: we won't merge edge-to-edge regions (but the EPDC probably will).
-        if region:intersectWith(refresh.region) then
+        -- Check for collisions with refreshes that are already enqueued.
+        -- NOTE: We use the open range variant, as we want to combine rectangles that share an edge (like the EPDC).
+        if region:openIntersectWith(refresh.region) then
             -- combine both refreshes' regions
             local combined = region:combine(refresh.region)
             -- update the mode, if needed
@@ -1261,8 +1268,8 @@ function UIManager:_repaint()
     end
     self._refresh_func_stack = {}
 
-    -- we should have at least one refresh if we did repaint.  If we don't, we
-    -- add one now and log a warning if we are debugging
+    -- We should have at least one refresh if we did repaint.
+    -- If we don't, add one now and log a warning if we are debugging.
     if dirty and not self._refresh_stack[1] then
         logger.dbg("no refresh got enqueued. Will do a partial full screen refresh, which might be inefficient")
         self:_refresh("partial")
@@ -1419,11 +1426,13 @@ end
 
 -- Process all pending events on all registered ZMQs.
 function UIManager:processZMQs()
-    if self._zeromqs[1] then
-        self.event_hook:execute("InputEvent")
-    end
+    local sent_InputEvent = false
     for _, zeromq in ipairs(self._zeromqs) do
         for input_event in zeromq.waitEvent, zeromq do
+            if not sent_InputEvent then
+                self.event_hook:execute("InputEvent")
+                sent_InputEvent = true
+            end
             self:handleInputEvent(input_event)
         end
     end
@@ -1647,7 +1656,7 @@ function UIManager:_standbyTransition()
 end
 
 -- Used by a PM transition event handler to request an early return from input polling.
--- NOTE: We can't re-use setInputTimeout to avoid interactions with ZMQ...
+-- NOTE: We can't reuse setInputTimeout to avoid interactions with ZMQ...
 function UIManager:consumeInputEarlyAfterPM(toggle)
     self._pm_consume_input_early = toggle
 end

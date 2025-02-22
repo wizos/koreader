@@ -30,7 +30,7 @@ local TitleBar = OverlapGroup:extend{
     title_face = nil, -- if not provided, one of these will be used:
     title_face_fullscreen = Font:getFace("smalltfont"),
     title_face_not_fullscreen = Font:getFace("x_smalltfont"),
-    -- by default: single line, truncated if overflow -- the default could be made dependant on self.fullscreen
+    -- by default: single line, truncated if overflow -- the default could be made dependent on self.fullscreen
     title_multilines = false, -- multilines if overflow
     title_shrink_font_to_fit = false, -- reduce font size so that single line text fits
 
@@ -159,7 +159,7 @@ function TitleBar:init()
                 -- We're with title_shrink_font_to_fit and in the first :init():
                 -- we don't want to go on measuring with this too long text.
                 -- We want metrics proper for when text fits, so if later :setTitle()
-                -- is called with a text that fits, this text will look allright.
+                -- is called with a text that fits, this text will look alright.
                 -- Longer title with a smaller font size should be laid out on the
                 -- baseline of a fitted text.
                 -- So, go on computing sizes with an empty title. When all is
@@ -224,7 +224,7 @@ function TitleBar:init()
             }
         end
     end
-    -- To debug vertical positionning:
+    -- To debug vertical positioning:
     -- local FrameContainer = require("ui/widget/container/framecontainer")
     -- self.title_widget = FrameContainer:new{ padding=0, margin=0, bordersize=1, self.title_widget}
     -- self.subtitle_widget = FrameContainer:new{ padding=0, margin=0, bordersize=1, self.subtitle_widget}
@@ -434,21 +434,22 @@ function TitleBar:setTitle(title, no_refresh)
             self.inner_title_group:resetLayout()
         end
         self.title_group:resetLayout()
-        if no_refresh then
-            return
+        if not no_refresh then
+            UIManager:setDirty(self.show_parent, "ui", self.dimen)
         end
-        UIManager:setDirty(self.show_parent, "ui", self.dimen)
     end
 end
 
-function TitleBar:setSubTitle(subtitle)
+function TitleBar:setSubTitle(subtitle, no_refresh)
     if self.subtitle_widget and not self.subtitle_multilines then -- no TextBoxWidget:setText() available
         self.subtitle_widget:setText(subtitle)
         if self.inner_subtitle_group then
             self.inner_subtitle_group:resetLayout()
         end
         self.title_group:resetLayout()
-        UIManager:setDirty(self.show_parent, "ui", self.dimen)
+        if not no_refresh then
+            UIManager:setDirty(self.show_parent, "ui", self.dimen)
+        end
     end
 end
 

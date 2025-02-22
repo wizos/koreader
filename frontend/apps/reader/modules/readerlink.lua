@@ -3,9 +3,10 @@ ReaderLink is an abstraction for document-specific link interfaces.
 ]]
 
 local BD = require("ui/bidi")
-local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
+local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
+local DocumentRegistry = require("document/documentregistry")
 local Event = require("ui/event")
 local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
@@ -66,6 +67,7 @@ local ReaderLink = InputContainer:extend{
     location_stack = nil, -- table, per-instance
     forward_location_stack = nil, -- table, per-instance
     _external_link_buttons = nil,
+    supported_external_schemes = nil,
 }
 
 function ReaderLink:init()
@@ -117,7 +119,7 @@ function ReaderLink:init()
     end)
     if G_reader_settings:isTrue("opening_page_location_stack") then
         -- Add location at book opening to stack
-        self.ui:registerPostReadyCallback(function()
+        self.ui:registerPostReaderReadyCallback(function()
             self:addCurrentLocationToStack()
         end)
     end
@@ -135,12 +137,16 @@ function ReaderLink:init()
     -- delegate gesture listener to readerui, NOP our own
     self.ges_events = nil
 
+    -- Set always supported external link schemes
+    self.supported_external_schemes = {"http", "https"}
+
     -- Set up buttons for alternative external link handling methods
     self._external_link_buttons = {}
     self._external_link_buttons["10_copy"] = function(this, link_url)
         return {
             text = _("Copy"),
             callback = function()
+                Device.input.setClipboardText(link_url)
                 UIManager:close(this.external_link_dialog)
             end,
         }
@@ -223,10 +229,31 @@ function ReaderLink:init()
     end
 end
 
+-- Register URL scheme. The external link dialog will be brought up when a URL
+-- with a registered scheme is followed; this also applies to schemeless
+-- (including relative) URLs if the empty scheme ("") is registered,
+-- overriding the default behaviour of treating these as filepaths.
+-- Registering the "file" scheme also overrides its default handling.
+-- Registered schemes are reset on each initialisation of ReaderLink.
+function ReaderLink:registerScheme(scheme)
+    table.insert(self.supported_external_schemes, scheme)
+end
+
 function ReaderLink:onGesture() end
 
 function ReaderLink:registerKeyEvents()
-    if Device:hasKeys() then
+    if Device:hasScreenKB() or Device:hasSymKey() then
+        self.key_events.GotoSelectedPageLink = { { "Press" }, event = "GotoSelectedPageLink" }
+        if Device:hasKeyboard() then
+            self.key_events.AddCurrentLocationToStackNonTouch = { { "Shift", "Press" } }
+            self.key_events.SelectNextPageLink = { { "Shift", "LPgFwd" }, event = "SelectNextPageLink" }
+            self.key_events.SelectPrevPageLink = { { "Shift", "LPgBack" }, event = "SelectPrevPageLink" }
+        else
+            self.key_events.AddCurrentLocationToStackNonTouch = { { "ScreenKB", "Press" } }
+            self.key_events.SelectNextPageLink = { { "ScreenKB", "LPgFwd" }, event = "SelectNextPageLink" }
+            self.key_events.SelectPrevPageLink = { { "ScreenKB", "LPgBack" }, event = "SelectPrevPageLink" }
+        end
+    elseif Device:hasKeys() then
         self.key_events = {
             SelectNextPageLink = {
                 { "Tab" },
@@ -234,7 +261,6 @@ function ReaderLink:registerKeyEvents()
             },
             SelectPrevPageLink = {
                 { "Shift", "Tab" },
-                { "Sym", "Tab" }, -- Shift or Sym + Tab
                 event = "SelectPrevPageLink",
             },
             GotoSelectedPageLink = {
@@ -668,7 +694,7 @@ function ReaderLink:onTap(_, ges)
             --
             -- 30px on a reference 167 dpi screen makes 0.45cm, which
             -- seems fine (on a 300dpi device, this will be scaled
-            -- to 54px (which makes 1/20th of screen witdh on a GloHD)
+            -- to 54px (which makes 1/20th of screen width on a GloHD)
             -- Trust Screen.dpi (which may not be the real device
             -- screen DPI if the user has set another one).
             max_distance = Screen:scaleByDPI(30)
@@ -701,6 +727,13 @@ function ReaderLink:onAddCurrentLocationToStack(show_notification)
     if show_notification then
         Notification:notify(_("Current location added to history."))
     end
+    return true
+end
+
+function ReaderLink:onAddCurrentLocationToStackNonTouch()
+    self:addCurrentLocationToStack()
+    Notification:notify(_("Current location added to history."), Notification.SOURCE_ALWAYS_SHOW)
+    return true
 end
 
 -- Remember current location so we can go back to it
@@ -708,6 +741,10 @@ function ReaderLink:addCurrentLocationToStack(loc)
     local location = loc and loc or self:getCurrentLocation()
     self:onClearForwardLocationStack()
     table.insert(self.location_stack, location)
+end
+
+function ReaderLink:popFromLocationStack()
+    return table.remove(self.location_stack)
 end
 
 function ReaderLink:onClearLocationStack(show_notification)
@@ -806,8 +843,9 @@ function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_po
     end
     logger.dbg("ReaderLink:onGotoLink: External link:", link_url)
 
-    local is_http_link = link_url:find("^https?://") ~= nil
-    if is_http_link and self:onGoToExternalLink(link_url) then
+    local scheme = link_url:match("^(%w[%w+%-.]*):") or ""
+    local is_supported_external_link = util.arrayContains(self.supported_external_schemes, scheme:lower())
+    if is_supported_external_link and self:onGoToExternalLink(link_url) then
         return true
     end
 
@@ -822,9 +860,7 @@ function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_po
     linked_filename  = ffiutil.joinPath(self.document_dir, linked_filename) -- get full path
     linked_filename = ffiutil.realpath(linked_filename) -- clean full path from ./ or ../
     if linked_filename and lfs.attributes(linked_filename, "mode") == "file" then
-        local DocumentRegistry = require("document/documentregistry")
-        local provider = DocumentRegistry:getProvider(linked_filename)
-        if provider then
+        if DocumentRegistry:hasProvider(linked_filename) then
             -- Display filename with anchor or query string, so the user gets
             -- this information and can manually go to the appropriate place
             local display_filename = linked_filename
@@ -858,7 +894,7 @@ end
 
 function ReaderLink:onGoToExternalLink(link_url)
     local buttons, title = self:getButtonsForExternalLinkDialog(link_url)
-    self.external_link_dialog = ButtonDialogTitle:new{
+    self.external_link_dialog = ButtonDialog:new{
         title = title,
         buttons = buttons,
     }
@@ -1059,7 +1095,9 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
         for _, link in ipairs(links) do
             -- link.uri may be an empty string with some invalid links: ignore them
             if link.section or (link.uri and link.uri ~= "") then
-                if link.segments then
+                -- Note: we may get segments empty in some conditions (in which
+                -- case we'll fallback to the 'else' branch and using x/y)
+                if link.segments and #link.segments > 0 then
                     -- With segments, each is a horizontal segment, with start_x < end_x,
                     -- and we should compute the distance from gesture position to
                     -- each segment.
@@ -1254,7 +1292,7 @@ function ReaderLink:onGoToLatestBookmark(ges)
     if latest_bookmark then
         if self.ui.paging then
             -- self:onGotoLink() needs something with a page attribute.
-            -- we need to substract 1 to bookmark page, as links start from 0
+            -- we need to subtract 1 to bookmark page, as links start from 0
             -- and onGotoLink will add 1 - we need a fake_link (with a single
             -- page attribute) so we don't touch the bookmark itself
             local fake_link = {}
@@ -1317,7 +1355,7 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
         flags = flags + 0x0002
     end
     -- Checks for private CSS properties "-cr-hint: footnote/noteref/..." are
-    -- always done (they can be applied to specific elements or classe names
+    -- always done (they can be applied to specific elements or class names
     -- with Styles tweaks.)
 
     -- Trust role= and epub:type= attribute values if defined, for source(*) and target
