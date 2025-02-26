@@ -90,11 +90,11 @@ local CreOptions = {
                     end
                 end,
                 -- For Dispatcher & onMakeDefault's sake
-                labels = {C_("Rotation", "⤹ 90°"), C_("Rotation", "↑ 0°"), C_("Rotation", "⤸ 90°"), C_("Rotation", "↓ 180°")},
+                labels = optionsutil.rotation_labels,
                 alternate = false,
-                values = {Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE, Screen.DEVICE_ROTATED_UPRIGHT, Screen.DEVICE_ROTATED_CLOCKWISE, Screen.DEVICE_ROTATED_UPSIDE_DOWN},
-                args = {Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE, Screen.DEVICE_ROTATED_UPRIGHT, Screen.DEVICE_ROTATED_CLOCKWISE, Screen.DEVICE_ROTATED_UPSIDE_DOWN},
-                default_arg = 0,
+                values = optionsutil.rotation_modes,
+                default_value = Screen.DEVICE_ROTATED_UPRIGHT,
+                args = optionsutil.rotation_modes,
                 current_func = function() return Screen:getRotationMode() end,
                 event = "SetRotationMode",
                 name_text_hold_callback = optionsutil.showValues,
@@ -106,7 +106,6 @@ local CreOptions = {
                 values = {1, 2},
                 default_value = 1,
                 args = {1, 2},
-                default_arg = 1,
                 event = "SetVisiblePages",
                 --[[ Commented out, to have it also available in portrait mode
                 current_func = function()
@@ -184,7 +183,6 @@ This is disabled in scroll mode. Switching from page mode with two columns to sc
                 default_value = 0,
                 event = "SyncPageTopBottomMargins",
                 args = {false, true},
-                default_arg = false,
                 hide_on_apply = true,
                 name_text_hold_callback = optionsutil.showValues,
                 help_text = _([[Keep top and bottom margins synchronized.
@@ -223,9 +221,8 @@ In the top menu → Settings → Status bar, you can choose whether the bottom m
                     G_defaults:readSetting("DCREREADER_CONFIG_T_MARGIN_SIZES_XX_HUGE"),
                 },
                 hide_on_apply = true,
-                name_text_hold_callback = function(configurable, opt, prefix)
-                    optionsutil.showValues(configurable, opt, prefix, nil, "mm")
-                end,
+                name_text_hold_callback = optionsutil.showValues,
+                name_text_unit = true,
                 more_options = true,
                 more_options_param = {
                     -- Allow this to tune both top and bottom margins, handling
@@ -277,9 +274,8 @@ In the top menu → Settings → Status bar, you can choose whether the bottom m
                     G_defaults:readSetting("DCREREADER_CONFIG_B_MARGIN_SIZES_XX_HUGE"),
                 },
                 hide_on_apply = true,
-                name_text_hold_callback = function(configurable, opt, prefix)
-                    optionsutil.showValues(configurable, opt, prefix, nil, "mm")
-                end,
+                name_text_hold_callback = optionsutil.showValues,
+                name_text_unit = true,
                 help_text = _([[In the top menu → Settings → Status bar, you can choose whether the bottom margin applies from the bottom of the screen, or from above the status bar.]]),
                 more_options = true,
                 more_options_param = {
@@ -310,9 +306,8 @@ In the top menu → Settings → Status bar, you can choose whether the bottom m
                 name_text = _("View Mode"),
                 toggle = {_("page"), _("continuous")},
                 values = {0, 1},
-                default_value = 0,
+                default_value = G_defaults:readSetting("DCREREADER_VIEW_MODE") == "page" and 0 or 1,
                 args = {"page", "scroll"},
-                default_arg = "page",
                 event = "SetViewMode",
                 name_text_hold_callback = optionsutil.showValues,
                 help_text = _([[- 'page' mode splits the text into pages, at the most acceptable places (page numbers and the number of pages may change when you change fonts, margins, styles, etc.).
@@ -325,7 +320,6 @@ In the top menu → Settings → Status bar, you can choose whether the bottom m
                 values = {0, 1, 2, 3},
                 default_value = 2,
                 args = {0, 1, 2, 3},
-                default_arg = 2,
                 event = "SetBlockRenderingMode",
                 name_text_hold_callback = optionsutil.showValues,
                 help_text = _([[
@@ -454,8 +448,9 @@ Note that your selected font size is not affected by this setting.]]),
                     local opt = {
                         name = "font_size",
                         name_text = _("Font Size"),
+                        name_text_unit = "pt",
                     }
-                    optionsutil.showValues(configurable, opt, prefix, nil, "pt")
+                    optionsutil.showValues(configurable, opt, prefix)
                 end,
             },
             {   -- ReaderFont
@@ -559,7 +554,7 @@ Note that your selected font size is not affected by this setting.]]),
                     unit = "%",
                     name = "cjk_width_scaling",
                     name_text = _("CJK width scaling"),
-                    info_text = _([[Increase the width of all CJK (Chinese, Japanese, Korean) chararacters by this percentage. This has the effect of adding space between these glyphs, and might make them easier to distinguish to some readers.]]),
+                    info_text = _([[Increase the width of all CJK (Chinese, Japanese, Korean) characters by this percentage. This has the effect of adding space between these glyphs, and might make them easier to distinguish to some readers.]]),
                     event = "SetCJKWidthScaling",
                     other_button = {
                         text = _("Word expansion"),
@@ -676,7 +671,6 @@ If a font variation is not available, as well as for fractional adjustments, it 
                 values = {1, 0}, -- Note that 0 means crengine header status line enabled, and 1 means disabled
                 default_value = 1,
                 args = {1, 0},
-                default_arg = 1,
                 event = "SetStatusLine",
                 name_text_hold_callback = optionsutil.showValues,
                 help_text = _([[Enable or disable the rendering engine alternative status bar at the top of the screen. The items displayed can be customized via the main menu.
@@ -690,7 +684,6 @@ Whether enabled or disabled, KOReader's own status bar at the bottom of the scre
                 values = {0, 1},
                 default_value = 1,
                 args = {false, true},
-                default_arg = nil,
                 event = "ToggleEmbeddedStyleSheet",
                 name_text_hold_callback = optionsutil.showValues,
                 help_text = _([[Enable or disable publisher stylesheets embedded in the book.
@@ -703,7 +696,6 @@ Whether enabled or disabled, KOReader's own status bar at the bottom of the scre
                 values = {0, 1},
                 default_value = 1,
                 args = {false, true},
-                default_arg = nil,
                 event = "ToggleEmbeddedFonts",
                 enabled_func = function(configurable, document)
                     return optionsutil.enableIfEquals(configurable, "embedded_css", 1)
@@ -731,7 +723,6 @@ Whether enabled or disabled, KOReader's own status bar at the bottom of the scre
                 values = {0, 1},
                 default_value = 0,
                 args = {false, true},
-                default_arg = nil,
                 event = "ToggleImageScaling",
                 name_text_hold_callback = optionsutil.showValues,
                 help_text = _([[- 'fast' uses a fast but inaccurate scaling algorithm when scaling images.
@@ -744,7 +735,6 @@ Whether enabled or disabled, KOReader's own status bar at the bottom of the scre
                 values = {1, 0},
                 default_value = 1,
                 args = {true, false},
-                default_arg = nil,
                 event = "ToggleNightmodeImages",
                 show_func = function() return Screen.night_mode end,
                 name_text_hold_callback = optionsutil.showValues,

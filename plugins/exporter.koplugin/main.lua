@@ -27,11 +27,15 @@ The parser looks to bookmarks._.text field for edited notes. bookmarks._.notes i
 
 local DataStorage = require("datastorage")
 local Device = require("device")
+local Dispatcher = require("dispatcher")
 local InfoMessage = require("ui/widget/infomessage")
 local MyClipping = require("clip")
 local NetworkMgr = require("ui/network/manager")
+local Provider = require("provider")
+local ReaderHighlight = require("apps/reader/modules/readerhighlight")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local T = require("ffi/util").template
 local logger = require("logger")
 local _ = require("gettext")
@@ -39,7 +43,8 @@ local _ = require("gettext")
 
 -- migrate settings from old "evernote.koplugin" or from previous (monolithic) "exporter.koplugin"
 local function migrateSettings()
-    local formats = { "html", "joplin", "json", "memos", "my_clippings", "readwise", "text" }
+    -- these are for legacy formats. Don't add new targets here.
+    local formats = { "html", "joplin", "json", "readwise", "text" }
 
     local settings = G_reader_settings:readSetting("exporter")
     if not settings then
@@ -95,29 +100,52 @@ local function updateMyClippings(clippings, new_clippings)
     return clippings
 end
 
+local targets = {
+    html = require("target/html"),
+    joplin = require("target/joplin"),
+    json = require("target/json"),
+    markdown = require("target/markdown"),
+    my_clippings = require("target/my_clippings"),
+    nextcloud = require("target/nextcloud"),
+    readwise = require("target/readwise"),
+    text = require("target/text"),
+    xmnote = require("target/xmnote"),
+}
+
+local function genExportersTable(path)
+    local t = {}
+    for k, v in pairs(targets) do
+        t[k] = v
+    end
+    if Provider:size("exporter") > 0 then
+        local tbl = Provider:getProvidersTable("exporter")
+        for k, v in pairs(tbl) do
+            t[k] = v
+        end
+    end
+    for _, v in pairs(t) do
+        v.path = path
+    end
+    return t
+end
+
 local Exporter = WidgetContainer:extend{
     name = "exporter",
-    targets = {
-        html = require("target/html"),
-        joplin = require("target/joplin"),
-        json = require("target/json"),
-        markdown = require("target/markdown"),
-        readwise = require("target/readwise"),
-        text = require("target/text"),
-        memos = require("target/memos"),
-        my_clippings = require("target/my_clippings"),
-    },
 }
 
 function Exporter:init()
     migrateSettings()
-    self.parser = MyClipping:new {
-        history_dir = DataStorage:getDataDir() .. "/history",
-    }
-    for k, _ in pairs(self.targets) do
-        self.targets[k].path = self.path
-    end
+    self.parser = MyClipping:new{}
+    self.targets = genExportersTable(self.path)
     self.ui.menu:registerToMainMenu(self)
+    self:onDispatcherRegisterActions()
+end
+
+function Exporter:onDispatcherRegisterActions()
+    Dispatcher:registerAction("export_current_notes",
+        {category="none", event="ExportCurrentNotes", title=_("Export all notes in current book"), reader=true,})
+    Dispatcher:registerAction("export_all_notes",
+        {category="none", event="ExportAllNotes", title=_("Export all notes in all books in history"), reader=true, filemanager=true})
 end
 
 function Exporter:isReady()
@@ -130,7 +158,7 @@ function Exporter:isReady()
 end
 
 function Exporter:isDocReady()
-    return self.ui and self.ui.document and self.view or false
+    return self.ui.document and true or false
 end
 
 function Exporter:isReadyToExport()
@@ -152,14 +180,17 @@ function Exporter:getDocumentClippings()
 end
 
 --- Parse and export highlights from the currently opened document.
-function Exporter:exportCurrentNotes()
+function Exporter:onExportCurrentNotes()
+    if not self:isReadyToExport() then return end
+    self.ui.annotation:updatePageNumbers(true)
     local clippings = self:getDocumentClippings()
     self:exportClippings(clippings)
 end
 
 --- Parse and export highlights from all the documents in History
 -- and from the Kindle "My Clippings.txt".
-function Exporter:exportAllNotes()
+function Exporter:onExportAllNotes()
+    if not self:isReady() then return end
     local clippings = {}
     clippings = updateHistoryClippings(clippings, self.parser:parseHistory())
     if Device:isKindle() then
@@ -219,7 +250,7 @@ function Exporter:exportClippings(clippings)
             })
         end)
 
-        UIManager:show(InfoMessage:new {
+        UIManager:show(InfoMessage:new{
             text = _("Exporting may take several seconds…"),
             timeout = 1,
         })
@@ -232,53 +263,79 @@ function Exporter:exportClippings(clippings)
 end
 
 function Exporter:addToMainMenu(menu_items)
-    local submenu = {}
-    local sharemenu = {}
+    local formats_submenu, share_submenu, styles_submenu = {}, {}, {}
     for k, v in pairs(self.targets) do
-        submenu[#submenu + 1] = v:getMenuTable()
+        formats_submenu[#formats_submenu + 1] = v:getMenuTable()
         if v.shareable then
-            sharemenu[#sharemenu + 1] = { text = T(_("Share as %1."), v.name), callback = function()
-                local clippings = self:getDocumentClippings()
-                local document
-                for _, notes in pairs(clippings) do
-                    document = notes or {}
-                end
-
-                if #document > 0 then
-                    v:share(document)
-                end
-            end
+            share_submenu[#share_submenu + 1] = {
+                text = T(_("Share as %1"), v.name),
+                callback = function()
+                    local clippings = self:getDocumentClippings()
+                    local document
+                    for _, notes in pairs(clippings) do
+                        document = notes or {}
+                    end
+                    if #document > 0 then
+                        v:share(document)
+                    end
+                end,
             }
         end
     end
-    table.sort(submenu, function(v1, v2)
+    table.sort(formats_submenu, function(v1, v2)
         return v1.text < v2.text
     end)
+    local settings = G_reader_settings:readSetting("exporter", {})
+    for i, v in ipairs(ReaderHighlight.getHighlightStyles()) do
+        local style = v[2]
+        styles_submenu[i] = {
+            text = v[1],
+            checked_func = function() -- all styles checked by default
+                return not (settings.highlight_styles and settings.highlight_styles[style] == false)
+            end,
+            callback = function()
+                if settings.highlight_styles and settings.highlight_styles[style] == false then
+                    settings.highlight_styles[style] = nil
+                    if next(settings.highlight_styles) == nil then
+                        settings.highlight_styles = nil
+                    end
+                else
+                    settings.highlight_styles = settings.highlight_styles or {}
+                    settings.highlight_styles[style] = false
+                end
+            end,
+        }
+    end
     local menu = {
         text = _("Export highlights"),
         sub_item_table = {
             {
-                text = _("Export all notes in this book"),
+                text = _("Export all notes in current book"),
                 enabled_func = function()
                     return self:isReadyToExport()
                 end,
                 callback = function()
-                    self:exportCurrentNotes()
+                    self:onExportCurrentNotes()
                 end,
             },
             {
-                text = _("Export all notes in your library"),
+                text = _("Export all notes in all books in history"),
                 enabled_func = function()
                     return self:isReady()
                 end,
                 callback = function()
-                    self:exportAllNotes()
+                    self:onExportAllNotes()
                 end,
-                separator = #sharemenu == 0,
+                separator = #share_submenu == 0,
             },
             {
                 text = _("Choose formats and services"),
-                sub_item_table = submenu,
+                sub_item_table = formats_submenu,
+            },
+            {
+                text = _("Choose highlight styles"),
+                sub_item_table = styles_submenu,
+                separator = true,
             },
             {
                 text = _("Choose export folder"),
@@ -287,10 +344,19 @@ function Exporter:addToMainMenu(menu_items)
                     self:chooseFolder()
                 end,
             },
-        }
+            {
+                text = _("Use book folder for single export"),
+                checked_func = function()
+                    return settings.clipping_dir_book
+                end,
+                callback = function()
+                    settings.clipping_dir_book = not settings.clipping_dir_book or nil
+                end,
+            },
+        },
     }
-    if #sharemenu > 0 then
-        table.sort(sharemenu, function(v1, v2)
+    if #share_submenu > 0 then
+        table.sort(share_submenu, function(v1, v2)
             return v1.text < v2.text
         end)
         table.insert(menu.sub_item_table, 3, {
@@ -298,7 +364,7 @@ function Exporter:addToMainMenu(menu_items)
             enabled_func = function()
                 return self:isDocReady()
             end,
-            sub_item_table = sharemenu,
+            sub_item_table = share_submenu,
             separator = true,
         })
     end
@@ -306,40 +372,14 @@ function Exporter:addToMainMenu(menu_items)
 end
 
 function Exporter:chooseFolder()
-    local function set_targets_clipping_dir(dir)
-        for k in pairs(self.targets) do
-            self.targets[k].clipping_dir = dir
-        end
+    local settings = G_reader_settings:readSetting("exporter", {})
+    local title_header = _("Current export folder:")
+    local current_path = settings.clipping_dir
+    local default_path = DataStorage:getFullDataDir() .. "/clipboard"
+    local caller_callback = function(path)
+        settings.clipping_dir = path
     end
-    local clipping_dir_default = DataStorage:getFullDataDir() .. "/clipboard"
-    local settings = G_reader_settings:readSetting("exporter") or {}
-    local clipping_dir = settings.clipping_dir or clipping_dir_default
-    local MultiConfirmBox = require("ui/widget/multiconfirmbox")
-    local confirm_box = MultiConfirmBox:new{
-        text = T(_("Export folder is set to:\n%1\n\nChoose new export folder?"), clipping_dir),
-        choice1_text = _("Use default"),
-        choice1_callback = function()
-            settings.clipping_dir = nil
-            G_reader_settings:saveSetting("exporter", settings)
-            set_targets_clipping_dir(clipping_dir_default)
-        end,
-        choice2_text = _("Choose folder"),
-        choice2_callback = function()
-            local PathChooser = require("ui/widget/pathchooser")
-            local path_chooser = PathChooser:new{
-                select_file = false,
-                show_files = false,
-                path = clipping_dir,
-                onConfirm = function(new_path)
-                    settings.clipping_dir = new_path
-                    G_reader_settings:saveSetting("exporter", settings)
-                    set_targets_clipping_dir(new_path)
-                end
-            }
-            UIManager:show(path_chooser)
-        end,
-    }
-    UIManager:show(confirm_box)
+    filemanagerutil.showChooseDialog(title_header, caller_callback, current_path, default_path)
 end
 
 return Exporter

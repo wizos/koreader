@@ -1,5 +1,5 @@
 --[[--
-A runtime optimized module to compare and do simple arithmetics with fixed point time values (which are called fts in here).
+A runtime optimized module to compare and do simple arithmetic with fixed point time values (which are called fts in here).
 
 Also implements functions to retrieve time from various system clocks (monotonic, monotonic_coarse, realtime, realtime_coarse, boottime ...).
 
@@ -77,9 +77,9 @@ All other time variables (a handful) get the appropriate suffix `_ms`, `_us`, `_
 
     local start_time = time.now()
     -- Do some stuff.
-    -- You can add and subtract `fts times` objects.
-    local duration = time.now() - start.fts
-    -- And convert that object to various more human-readable formats, e.g.,
+    -- You can add and subtract `fts times` objects
+    local duration = time.now() - start_time
+    -- and convert that object to various more human-readable formats, e.g.,
     print(string.format("Stuff took %.3fms", time.to_ms(duration)))
 
     local offset = time.s(100)
@@ -107,25 +107,25 @@ local FTS2US = 1 / US2FTS
 -- Fixed point time
 local time = {}
 
---- Sometimes we need a very large time
+--- Sometimes we need a very large time.
 time.huge = math.huge
 
---- Creates a time (fts) from a number in seconds
+--- Creates a time (fts) from a number in seconds.
 function time.s(seconds)
     return math.floor(seconds * S2FTS)
 end
 
---- Creates a time (fts) from a number in milliseconds
+--- Creates a time (fts) from a number in milliseconds.
 function time.ms(msec)
     return math.floor(msec * MS2FTS)
 end
 
---- Creates a time (fts) from a number in microseconds
+--- Creates a time (fts) from a number in microseconds.
 function time.us(usec)
     return math.floor(usec * US2FTS)
 end
 
---- Creates a time (fts) from a structure similar to timeval
+--- Creates a time (fts) from a structure similar to timeval.
 function time.timeval(tv)
     return tv.sec * S2FTS + tv.usec * US2FTS
 end
@@ -159,7 +159,7 @@ end
 
 --[[-- Compare a past *MONOTONIC* fts time to *now*, returning the elapsed time between the two. (sec.usecs variant)
 
-Returns a Lua (decimal) number (sec.usecs, with decimal places) (accurate to the µs)
+Returns a Lua (decimal) number (sec.usecs, with decimal places) (accurate to the µs).
 ]]
 function time.since(start_time)
     -- Time difference
@@ -226,7 +226,7 @@ Which means that, yes, this is a fancier POSIX Epoch ;).
     local time = require("ui/time")
     local fts_start = time.realtime()
     -- Do some stuff.
-    -- You can add and substract fts times
+    -- You can add and subtract fts times
     local fts_duration = time.realtime() - fts_start
 
 @treturn fts fixed point time
@@ -282,7 +282,7 @@ if HAVE_BOOTTIME then
     time.boottime_or_realtime_coarse = time.boottime
 else
     function time.boottime()
-        logger.warn("fts: Attemped to call boottime on a platform where it's unsupported!")
+        logger.warn("fts: Attempted to call boottime on a platform where it's unsupported!")
         return 0
     end
 

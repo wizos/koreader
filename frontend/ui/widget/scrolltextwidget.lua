@@ -23,6 +23,7 @@ local ScrollTextWidget = InputContainer:extend{
     charpos = nil,
     top_line_num = nil,
     editable = false,
+    select_mode = nil, -- select mode in InputText
     scroll_callback = nil, -- called with (low, high) when view is scrolled
     scroll_by_pan = false, -- allow scrolling by lines with Pan
     face = nil,
@@ -40,6 +41,7 @@ local ScrollTextWidget = InputContainer:extend{
     para_direction_rtl = nil,
     auto_para_direction = false,
     alignment_strict = false,
+    highlight_text_selection = false,
 
     -- for internal use
     for_measurement_only = nil, -- When the widget is a one-off used to compute text height
@@ -53,6 +55,7 @@ function ScrollTextWidget:init()
         top_line_num = self.top_line_num,
         dialog = self.dialog,
         editable = self.editable,
+        select_mode = self.select_mode,
         face = self.face,
         image_alt_face = self.image_alt_face,
         fgcolor = self.fgcolor,
@@ -66,6 +69,7 @@ function ScrollTextWidget:init()
         auto_para_direction = self.auto_para_direction,
         alignment_strict = self.alignment_strict,
         for_measurement_only = self.for_measurement_only,
+        highlight_text_selection = self.highlight_text_selection,
     }
     local visible_line_count = self.text_widget:getVisLineCount()
     local total_line_count = self.text_widget:getAllLineCount()

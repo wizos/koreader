@@ -10,14 +10,16 @@ local full_data_dir
 function DataStorage:getDataDir()
     if data_dir then return data_dir end
 
-    if isAndroid then
+    if os.getenv("KO_HOME") then
+        data_dir = os.getenv("KO_HOME")
+    elseif isAndroid then
         data_dir = android.getExternalStoragePath() .. "/koreader"
     elseif os.getenv("UBUNTU_APPLICATION_ISOLATION") then
         local app_id = os.getenv("APP_ID")
         local package_name = app_id:match("^(.-)_")
         -- confined ubuntu app has write access to this dir
         data_dir = string.format("%s/%s", os.getenv("XDG_DATA_HOME"), package_name)
-    elseif os.getenv("APPIMAGE") or os.getenv("KO_MULTIUSER") then
+    elseif os.getenv("APPIMAGE") or os.getenv("FLATPAK") or os.getenv("KO_MULTIUSER") then
         if os.getenv("XDG_CONFIG_HOME") then
             data_dir = string.format("%s/%s", os.getenv("XDG_CONFIG_HOME"), "koreader")
             if lfs.attributes(os.getenv("XDG_CONFIG_HOME"), "mode") ~= "directory" then
@@ -53,6 +55,10 @@ function DataStorage:getDocSettingsDir()
     return self:getDataDir() .. "/docsettings"
 end
 
+function DataStorage:getDocSettingsHashDir()
+    return self:getDataDir() .. "/hashdocsettings"
+end
+
 function DataStorage:getFullDataDir()
     if full_data_dir then return full_data_dir end
 
@@ -73,6 +79,7 @@ local function initDataDir()
         "data/dict",
         "data/tessdata",
         -- "docsettings", -- created when needed
+        -- "hashdocsettings", -- created when needed
         -- "history", -- legacy/obsolete sidecar files
         "ota",
         -- "patches", -- must be created manually by the interested user

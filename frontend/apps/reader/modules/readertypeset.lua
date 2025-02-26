@@ -17,7 +17,6 @@ local ReaderTypeset = WidgetContainer:extend{
     -- @translators This is style in the sense meant by CSS (cascading style sheets), relating to the layout and presentation of the document. See <https://en.wikipedia.org/wiki/CSS> for more information.
     css_menu_title = C_("CSS", "Style"),
     css = nil,
-    internal_css = true,
     unscaled_margins = nil,
 }
 
@@ -27,8 +26,16 @@ end
 
 function ReaderTypeset:onReadSettings(config)
     self.css = config:readSetting("css")
-            or G_reader_settings:readSetting("copt_css")
-            or self.ui.document.default_css
+    if not self.css then
+        if self.ui.document.is_fb2 then
+            self.css = G_reader_settings:readSetting("copt_fb2_css")
+        else
+            self.css = G_reader_settings:readSetting("copt_css")
+        end
+    end
+    if not self.css then
+        self.css = self.ui.document.default_css
+    end
     local tweaks_css = self.ui.styletweak:getCssText()
     self.ui.document:setStyleSheet(self.css, tweaks_css)
 
@@ -81,6 +88,20 @@ function ReaderTypeset:onReadSettings(config)
     self.ui.document:setNightmodeImages(self.configurable.nightmode_images == 1)
 end
 
+function ReaderTypeset:onReaderReady()
+    -- Initial detection of fb2 may be wrong
+    local doc_format = self.ui.document:getDocumentFormat()
+    local is_fb2 = doc_format:sub(1, 11) == "FictionBook"
+    if self.ui.document.is_fb2 ~= is_fb2 then
+        self.ui.document.is_fb2 = is_fb2
+        self.ui.document.default_css = is_fb2 and "./data/fb2.css" or "./data/epub.css"
+        if self.ui.document.is_new then
+            local css = G_reader_settings:readSetting(is_fb2 and "copt_fb2_css" or "copt_css")
+            self:setStyleSheet(css or self.ui.document.default_css)
+        end
+    end
+end
+
 function ReaderTypeset:onSaveSettings()
     self.ui.doc_settings:saveSetting("css", self.css)
 end
@@ -93,7 +114,6 @@ function ReaderTypeset:onToggleEmbeddedStyleSheet(toggle)
     else
         self.configurable.embedded_css = 0
         text = _("Disabled embedded styles.")
-        self:setStyleSheet(self.ui.document.default_css)
     end
     self.ui.document:setEmbeddedStyleSheet(self.configurable.embedded_css)
     self.ui:handleEvent(Event:new("UpdatePos"))
@@ -149,7 +169,7 @@ function ReaderTypeset:onSetRenderDPI(dpi)
 end
 
 -- June 2018: epub.css has been cleaned to be more conforming to HTML specs
--- and to not include class name based styles (with conditional compatiblity
+-- and to not include class name based styles (with conditional compatibility
 -- styles for previously opened documents). It should be usable on all
 -- HTML based documents, except FB2 which has some incompatible specs.
 -- These other css files have not been updated in the same way, and are
@@ -165,22 +185,33 @@ local OBSOLETED_CSS = {
 }
 
 function ReaderTypeset:genStyleSheetMenu()
-    local getStyleMenuItem = function(text, css_file, separator)
+    local getStyleMenuItem = function(text, css_file, description, fb2_compatible, separator)
         return {
             text_func = function()
-                return text .. (css_file == G_reader_settings:readSetting("copt_css") and "   ★" or "")
+                local css_opt = self.ui.document.is_fb2 and "copt_fb2_css" or "copt_css"
+                return text .. (css_file == G_reader_settings:readSetting(css_opt) and "   ★" or "")
             end,
             callback = function()
                 self:setStyleSheet(css_file or self.ui.document.default_css)
             end,
             hold_callback = function(touchmenu_instance)
-                self:makeDefaultStyleSheet(css_file, text, touchmenu_instance)
+                self:makeDefaultStyleSheet(css_file, text, description, touchmenu_instance)
             end,
             checked_func = function()
                 if not css_file then -- "Auto"
                     return self.css == self.ui.document.default_css
                 end
                 return css_file == self.css
+            end,
+            enabled_func = function()
+                if fb2_compatible == true and not self.ui.document.is_fb2 then
+                    return false
+                end
+                if fb2_compatible == false and self.ui.document.is_fb2 then
+                    return false
+                end
+                -- if fb2_compatible==nil, we don't know (user css file)
+                return true
             end,
             separator = separator,
         }
@@ -189,8 +220,18 @@ function ReaderTypeset:genStyleSheetMenu()
     local style_table = {}
     local obsoleted_table = {}
 
-    table.insert(style_table, getStyleMenuItem(_("None"), ""))
-    table.insert(style_table, getStyleMenuItem(_("Auto"), nil, true))
+    table.insert(style_table, getStyleMenuItem(
+        _("None"),
+        "",
+        _("This sets an empty User-Agent stylesheet, and expects the document stylesheet to style everything (which publishers probably don't).\nThis is mostly only interesting for testing.")
+    ))
+    table.insert(style_table, getStyleMenuItem(
+        _("Auto"),
+        nil,
+        _("This selects the default and preferred stylesheet for the document type."),
+        nil,
+        true -- separator
+    ))
 
     local css_files = {}
     for f in lfs.dir("./data") do
@@ -200,15 +241,39 @@ function ReaderTypeset:genStyleSheetMenu()
     end
     -- Add the 3 main styles
     if css_files["epub.css"] then
-        table.insert(style_table, getStyleMenuItem(_("HTML / EPUB (epub.css)"), css_files["epub.css"]))
+        table.insert(style_table, getStyleMenuItem(
+            _("Traditional book look (epub.css)"),
+            css_files["epub.css"],
+            _([[
+This is our book look-alike stylesheet: it extends the HTML standard stylesheet with styles aimed at making HTML content look more like a paper book (with justified text and indentation on paragraphs) than like a web page.
+It is perfect for unstyled books, and might make styled books more readable.
+It may cause some small issues on some books (miscentered titles, headings or separators, or unexpected text indentation), as publishers don't expect to have our added styles at play and need to reset them; try switching to html5.css when you notice such issues.]]),
+            false -- not fb2_compatible
+        ))
         css_files["epub.css"] = nil
     end
     if css_files["html5.css"] then
-        table.insert(style_table, getStyleMenuItem(_("HTML5 (html5.css)"), css_files["html5.css"]))
+        table.insert(style_table, getStyleMenuItem(
+            _("HTML Standard rendering (html5.css)"),
+            css_files["html5.css"],
+            _([[
+This stylesheet conforms to the HTML Standard rendering suggestions (with a few limitations), similar to what most web browsers use.
+As most publishers nowadays make and test their book with tools based on web browser engines, it is the stylesheet to use to see a book as these publishers intended.
+On unstyled books though, it may give them the look of a web page (left aligned paragraphs without indentation and with spacing between them); try switching to epub.css when that happens.]]),
+            false -- not fb2_compatible
+        ))
         css_files["html5.css"] = nil
     end
     if css_files["fb2.css"] then
-        table.insert(style_table, getStyleMenuItem(_("FictionBook (fb2.css)"), css_files["fb2.css"], true))
+        table.insert(style_table, getStyleMenuItem(
+            _("FictionBook (fb2.css)"),
+            css_files["fb2.css"],
+            _([[
+This stylesheet is to be used only with FB2 and FB3 documents, which are not classic HTML, and need some specific styling.
+(FictionBook 2 & 3 are open XML-based e-book formats which originated and gained popularity in Russia.)]]),
+            true, -- fb2_compatible
+            true -- separator
+        ))
         css_files["fb2.css"] = nil
     end
     -- Add the obsoleted ones to the Obsolete sub menu
@@ -216,7 +281,7 @@ function ReaderTypeset:genStyleSheetMenu()
     for __, css in ipairs(OBSOLETED_CSS) do
         obsoleted_css[css_files[css]] = css
         if css_files[css] then
-            table.insert(obsoleted_table, getStyleMenuItem(css, css_files[css]))
+            table.insert(obsoleted_table, getStyleMenuItem(css, css_files[css], _("This stylesheet is obsolete: don't use it. It is kept solely to be able to open documents last read years ago and to migrate their highlights.")))
             css_files[css] = nil
         end
     end
@@ -227,7 +292,7 @@ function ReaderTypeset:genStyleSheetMenu()
     end
     table.sort(user_files)
     for __, css in ipairs(user_files) do
-        table.insert(style_table, getStyleMenuItem(css, css_files[css]))
+        table.insert(style_table, getStyleMenuItem(css, css_files[css], _("This is a user added stylesheet.")))
     end
 
     style_table[#style_table].separator = true
@@ -266,6 +331,7 @@ function ReaderTypeset:setStyleSheet(new_css)
     end
 end
 
+-- Not used
 function ReaderTypeset:setEmbededStyleSheetOnly()
     if self.css ~= nil then
         -- clear applied css
@@ -355,11 +421,20 @@ function ReaderTypeset:addToMainMenu(menu_items)
     }
 end
 
-function ReaderTypeset:makeDefaultStyleSheet(css, text, touchmenu_instance)
+function ReaderTypeset:makeDefaultStyleSheet(css, name, description, touchmenu_instance)
+    local text = self.ui.document.is_fb2 and T(_("Set default style for FB2 documents to %1?"), BD.filename(name))
+                                          or T(_("Set default style to %1?"), BD.filename(name))
+    if description then
+        text = text .. "\n\n" .. description
+    end
     UIManager:show(ConfirmBox:new{
-        text = T(_("Set default style to %1?"), BD.filename(text)),
+        text = text,
         ok_callback = function()
-            G_reader_settings:saveSetting("copt_css", css)
+            if self.ui.document.is_fb2 then
+                G_reader_settings:saveSetting("copt_fb2_css", css)
+            else
+                G_reader_settings:saveSetting("copt_css", css)
+            end
             if touchmenu_instance then touchmenu_instance:updateItems() end
         end,
     })
@@ -445,13 +520,19 @@ function ReaderTypeset:onSetPageMargins(margins, when_applied_callback)
             text = T(_([[
 Margins set to:
 
-  left: %1 (%2px)
-  right: %3 (%4px)
-  top: %5 (%6px)
-  bottom: %7 (%8px)
+  left: %1
+  right: %2
+  top: %3
+  bottom: %4
+
+  footer: %5 px
 
 Tap to dismiss.]]),
-            margins[1], left, margins[3], right, margins[2], top, margins[4], bottom),
+            optionsutil.formatFlexSize(margins[1]),
+            optionsutil.formatFlexSize(margins[3]),
+            optionsutil.formatFlexSize(margins[2]),
+            optionsutil.formatFlexSize(margins[4]),
+            self.view.footer.reclaim_height and 0 or self.view.footer:getHeight()),
             dismiss_callback = when_applied_callback,
         })
     end

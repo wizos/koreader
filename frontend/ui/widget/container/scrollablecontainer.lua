@@ -45,8 +45,8 @@ local ScrollableContainer = InputContainer:extend{
     --   content_bottom = y of the content bottom of a row (included)
     -- that should not account for any top or bottom padding (which should be accounted in
     -- top/bottom), which will be used instead of top/bottom when looking for truncated rows.
-    -- The disctinction allows, if only some top or bottom padding is truncated, but not the
-    -- content, to consider it fully visible and to not need to be visible after the swipe,
+    -- The distinction allows (if only some top or bottom padding is truncated, but not the
+    -- content) to consider it fully visible and to not need to be visible after the swipe,
     -- but to still use these padding for the alignments.
     step_scroll_grid = nil,      -- either this array
     step_scroll_grid_func = nil, -- or a function returning this array
@@ -632,11 +632,20 @@ function ScrollableContainer:onScrollablePanRelease(_, ges)
     return false
 end
 
+function ScrollableContainer:_notifyParentOfPageScroll()
+    -- For ButtonDialog's focus shenanigans, as we ourselves are not a FocusManager
+    if self.show_parent and self.show_parent._onPageScrollToRow then
+        local top_row = self:_getStepScrollRowAtY(self._scroll_offset_y, true)
+        self.show_parent:_onPageScrollToRow(top_row and top_row.row_num or 1)
+    end
+end
+
 function ScrollableContainer:onScrollPageUp()
     if not self._is_scrollable then
         return false
     end
     self:_scrollBy(0, -self._crop_h, true)
+    self:_notifyParentOfPageScroll()
     return true
 end
 
@@ -645,6 +654,7 @@ function ScrollableContainer:onScrollPageDown()
         return false
     end
     self:_scrollBy(0, self._crop_h, true)
+    self:_notifyParentOfPageScroll()
     return true
 end
 

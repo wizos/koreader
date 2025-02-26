@@ -56,6 +56,7 @@ local OverlapGroup = require("ui/widget/overlapgroup")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
+local util = require("util")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local Widget = require("ui/widget/widget")
 local _ = require("gettext")
@@ -106,7 +107,7 @@ local NetworkItem = InputContainer:extend{
     icon_size = Screen:scaleBySize(32),
     width = nil,
     info = nil,
-    decoded_ssid = nil,
+    display_ssid = nil,
     background = Blitbuffer.COLOR_WHITE,
 }
 
@@ -115,7 +116,7 @@ function NetworkItem:init()
     if not self.info.ssid then
         self.info.ssid = "[hidden]"
     end
-    self.decoded_ssid = NetworkMgr.decodeSSID(self.info.ssid)
+    self.display_ssid = util.fixUtf8(self.info.ssid, "�")
 
     local wifi_icon
     if string.find(self.info.flags, "WPA") then
@@ -151,7 +152,7 @@ function NetworkItem:init()
                 },
                 horizontal_space,
                 TextWidget:new{
-                    text = self.decoded_ssid,
+                    text = self.display_ssid,
                     face = Font:getFace("cfont"),
                 },
             },
@@ -285,7 +286,7 @@ end
 function NetworkItem:onEditNetwork()
     local password_input
     password_input = InputDialog:new{
-        title = self.decoded_ssid,
+        title = self.display_ssid,
         input = self.info.password,
         input_hint = _("password (leave empty for open networks)"),
         input_type = "text",
@@ -328,7 +329,7 @@ end
 function NetworkItem:onAddNetwork()
     local password_input
     password_input = InputDialog:new{
-        title = self.decoded_ssid,
+        title = self.display_ssid,
         input = "",
         input_hint = _("password (leave empty for open networks)"),
         input_type = "text",
@@ -457,7 +458,7 @@ function NetworkSetting:init()
                     self.pagination:setProgress(curr_page/total_pages)
                     -- self.page_text:setText(curr_page .. "/" .. total_pages)
                     UIManager:setDirty(self, function()
-                        return "ui", self.dimen
+                        return "ui", self.popup.dimen
                     end)
                 end
             },
@@ -482,20 +483,26 @@ function NetworkSetting:init()
         }
     end
 
+    -- If the backend is already authenticated,
+    -- and NetworkMgr:reconnectOrShowNetworkMenu somehow missed it,
+    -- expedite the process.
+    -- Yes, this is a very old codepath that's hardly ever exercised anymore...
+    if not self.connect_callback then
+        return
+    end
+
     UIManager:nextTick(function()
         local connected_item = self:getConnectedItem()
         if connected_item ~= nil then
             obtainIP()
             if G_reader_settings:nilOrTrue("auto_dismiss_wifi_scan") then
-                UIManager:close(self, "ui", self.dimen)
+                UIManager:close(self)
             end
             UIManager:show(InfoMessage:new{
-                text = T(_("Connected to network %1"), BD.wrap(connected_item.decoded_ssid)),
+                text = T(_("Connected to network %1"), BD.wrap(connected_item.display_ssid)),
                 timeout = 3,
             })
-            if self.connect_callback then
-                self.connect_callback()
-            end
+            self.connect_callback()
         end
     end)
 end
@@ -513,6 +520,14 @@ function NetworkSetting:onTapClose(arg, ges_ev)
         UIManager:close(self)
         return true
     end
+end
+
+function NetworkSetting:onCloseWidget()
+    -- If we don't have a connectivity check ticking, assume we're done with this connection attempt *now*
+    if not NetworkMgr.pending_connectivity_check then
+        NetworkMgr.pending_connection = false
+    end
+    UIManager:setDirty(nil, "ui", self.popup.dimen)
 end
 
 return NetworkSetting

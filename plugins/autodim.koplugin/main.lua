@@ -5,6 +5,11 @@ Plugin for automatic dimming of the frontlight after an idle period.
 --]]--
 
 local Device = require("device")
+
+if not Device:hasFrontlight() then
+    return { disabled = true, }
+end
+
 local FFIUtil = require("ffi/util")
 local SpinWidget = require("ui/widget/spinwidget")
 local UIManager = require("ui/uimanager")
@@ -190,6 +195,8 @@ function AutoDim:onInputEvent()
     self:_unschedule_ramp_task()
     self:_schedule_autodim_task()
 end
+
+AutoDim.onPageUpdate = AutoDim.onInputEvent
 
 function AutoDim:_onSuspend()
     self:_unschedule_autodim_task()
