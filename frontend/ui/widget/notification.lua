@@ -30,6 +30,7 @@ local SOURCE_BOTTOM_MENU_MORE     = 0x0008 -- three dots in bottom menu
 local SOURCE_BOTTOM_MENU_PROGRESS = 0x0010 -- progress indicator on bottom menu
 local SOURCE_DISPATCHER           = 0x0020 -- dispatcher
 local SOURCE_OTHER                = 0x0040 -- all other sources (e.g. keyboard)
+local SOURCE_ALWAYS_SHOW          = 0x8000 -- display this, no matter the display preferences
 
 -- All bottom menu bits
 local SOURCE_BOTTOM_MENU = SOURCE_BOTTOM_MENU_ICON +
@@ -39,11 +40,12 @@ local SOURCE_BOTTOM_MENU = SOURCE_BOTTOM_MENU_ICON +
                            SOURCE_BOTTOM_MENU_PROGRESS
 
 -- these values can be changed here
-local SOURCE_SOME = SOURCE_BOTTOM_MENU_FINE +
-                    SOURCE_DISPATCHER
-local SOURCE_DEFAULT = SOURCE_SOME +
-                       SOURCE_BOTTOM_MENU_MORE +
-                       SOURCE_BOTTOM_MENU_PROGRESS
+local SOURCE_SOME = SOURCE_BOTTOM_MENU_FINE
+local SOURCE_MORE = SOURCE_SOME +
+                    SOURCE_BOTTOM_MENU_MORE +
+                    SOURCE_BOTTOM_MENU_PROGRESS
+local SOURCE_DEFAULT = SOURCE_MORE +
+                       SOURCE_DISPATCHER
 local SOURCE_ALL = SOURCE_BOTTOM_MENU +
                    SOURCE_DISPATCHER +
                    SOURCE_OTHER
@@ -57,6 +59,7 @@ local Notification = InputContainer:extend{
     margin = Size.margin.default,
     padding = Size.padding.default,
     timeout = 2, -- default to 2 seconds
+    _timeout_func = nil,
     toast = true, -- closed on any event, and let the event propagate to next top widget
 
     _shown_list = {}, -- actual static class member, array of stacked notifications (value is show (well, init) time or false).
@@ -69,13 +72,16 @@ local Notification = InputContainer:extend{
     SOURCE_BOTTOM_MENU_PROGRESS = SOURCE_BOTTOM_MENU_PROGRESS,
     SOURCE_DISPATCHER = SOURCE_DISPATCHER,
     SOURCE_OTHER = SOURCE_OTHER,
+    SOURCE_ALWAYS_SHOW = SOURCE_ALWAYS_SHOW,
 
     SOURCE_BOTTOM_MENU = SOURCE_BOTTOM_MENU,
 
     SOURCE_NONE = 0,
     SOURCE_SOME = SOURCE_SOME,
+    SOURCE_MORE = SOURCE_MORE,
     SOURCE_DEFAULT = SOURCE_DEFAULT,
     SOURCE_ALL = SOURCE_ALL,
+
     _past_messages = {}, -- a static class member to store the N last messages text
 }
 
@@ -145,7 +151,7 @@ function Notification:setNotifySource(source)
 end
 
 function Notification:resetNotifySource()
-    self.notify_source = Notification.SOURCE_OTHER
+    self.notify_source = SOURCE_OTHER
 end
 
 function Notification:getNotifySource()
@@ -155,8 +161,8 @@ end
 -- Display a notification popup if `source` or `self.notify_source` is not masked by the `notification_sources_to_show_mask` setting
 function Notification:notify(arg, source, refresh_after)
     source = source or self.notify_source
-    local mask = G_reader_settings:readSetting("notification_sources_to_show_mask") or self.SOURCE_DEFAULT
-    if source and band(mask, source) ~= 0 then
+    local mask = G_reader_settings:readSetting("notification_sources_to_show_mask") or SOURCE_DEFAULT
+    if source and (source == SOURCE_ALWAYS_SHOW or band(mask, source) ~= 0) then
         UIManager:show(Notification:new{
             text = arg,
          })
@@ -200,6 +206,11 @@ function Notification:onCloseWidget()
     UIManager:setDirty(nil, function()
         return "ui", self.frame.dimen
     end)
+    -- If we were closed early, drop the scheduled timeout
+    if self._timeout_func then
+        UIManager:unschedule(self._timeout_func)
+        self._timeout_func = nil
+    end
 end
 
 function Notification:onShow()
@@ -207,7 +218,11 @@ function Notification:onShow()
         return "ui", self.frame.dimen
     end)
     if self.timeout then
-        UIManager:scheduleIn(self.timeout, function() UIManager:close(self) end)
+        self._timeout_func = function()
+            self._timeout_func = nil
+            UIManager:close(self)
+        end
+        UIManager:scheduleIn(self.timeout, self._timeout_func)
     end
 
     if #self._past_messages >= MAX_NB_PAST_MESSAGES then

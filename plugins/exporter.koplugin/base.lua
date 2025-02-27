@@ -6,12 +6,19 @@ Each target should inherit from this class and implement *at least* an `export` 
 @module baseexporter
 ]]
 
+local DataStorage = require("datastorage")
 local Device = require("device")
-local getSafeFilename = require("util").getSafeFilename
+local http = require("socket.http")
+local ltn12 = require("ltn12")
+local rapidjson = require("rapidjson")
+local socket = require("socket")
+local socketutil = require("socketutil")
+
+local util = require("util")
 local _ = require("gettext")
 
 local BaseExporter = {
-    clipping_dir = require("datastorage"):getDataDir() .. "/clipboard"
+    clipping_dir = DataStorage:getFullDataDir() .. "/clipboard"
 }
 
 function BaseExporter:new(o)
@@ -63,9 +70,6 @@ Loads settings for the exporter
 function BaseExporter:loadSettings()
     local plugin_settings = G_reader_settings:readSetting("exporter") or {}
     self.settings = plugin_settings[self.name] or {}
-    if plugin_settings.clipping_dir then
-        self.clipping_dir = plugin_settings.clipping_dir
-    end
 end
 
 --[[--
@@ -93,13 +97,20 @@ File path where the exporter writes its output
 @treturn string absolute path or nil
 ]]
 function BaseExporter:getFilePath(t)
-    if not self.is_remote then
-        local filename = string.format("%s-%s.%s",
-            self:getTimeStamp(),
-            #t == 1 and t[1].output_filename or self.all_books_title or "all-books",
-            self.extension)
-        return self.clipping_dir .. "/" .. getSafeFilename(filename)
+    if self.is_remote then return end
+    local plugin_settings = G_reader_settings:readSetting("exporter") or {}
+    local clipping_dir = plugin_settings.clipping_dir or self.clipping_dir
+    local title
+    if #t == 1 then
+        title = t[1].output_filename
+        if plugin_settings.clipping_dir_book then
+            clipping_dir = util.splitFilePathName(t[1].file):sub(1, -2)
+        end
+    else
+        title = self.all_books_title or "all-books"
     end
+    local filename = string.format("%s-%s.%s", self:getTimeStamp(), title, self.extension)
+    return clipping_dir .. "/" .. util.getSafeFilename(filename)
 end
 
 --[[--
@@ -151,10 +162,64 @@ end
 Shares text with other apps
 ]]
 function BaseExporter:shareText(text, title)
-    local msg_reason = _("Share") .. " " .. self.name
-    local msg_text = type(text) == "string" and text
-    local msg_title = type(title) == "string" and title
-    Device:doShareText(msg_text, msg_reason, msg_title, self.mimetype)
+    local reason = _("Share") .. " " .. self.name
+    Device:doShareText(text, reason, title, self.mimetype)
+end
+
+--[[--
+Makes a json request against a remote endpoint
+
+@param endpoint string url
+@param method string method
+@param body string json string to encode
+@param headers table of additional headers
+
+@treturn response or nil, err
+]]
+
+function BaseExporter:makeJsonRequest(endpoint, method, body, headers)
+    local sink = {}
+    local extra_headers = headers or {}
+    local body_json = rapidjson.encode(body)
+    if not body_json then
+        return nil, "Invalid JSON string"
+    end
+    local source = ltn12.source.string(body_json)
+    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+
+    local request = {
+        url = endpoint,
+        method = method,
+        sink = ltn12.sink.table(sink),
+        source = source,
+        headers = {
+            ["Content-Length"] = #body_json,
+            ["Content-Type"] = "application/json",
+        },
+    }
+
+    -- fill in extra headers
+    for k, v in pairs(extra_headers) do
+        request.headers[k] = v
+    end
+
+    local code = socket.skip(1, http.request(request))
+    socketutil:reset_timeout()
+
+    if code ~= 200 then
+        return nil, "Server HTTP response code is not OK"
+    end
+
+    if not sink[1] then
+        return nil, "No response from server"
+    end
+
+    local response, err = rapidjson.decode(sink[1])
+    if not response then
+        return nil, "Unable to decode JSON: " .. err
+    end
+
+    return response
 end
 
 return BaseExporter

@@ -2,12 +2,13 @@
 This module contains miscellaneous helper functions for the KOReader frontend.
 ]]
 
-local BaseUtil = require("ffi/util")
 local Utf8Proc = require("ffi/utf8proc")
+local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
+local md5 = require("ffi/sha2").md5
 local _ = require("gettext")
 local C_ = _.pgettext
-local T = BaseUtil.template
+local T = ffiUtil.template
 
 local lshift = bit.lshift
 local rshift = bit.rshift
@@ -49,9 +50,41 @@ end
 ---- @string s the string to be trimmed
 ---- @treturn string trimmed text
 function util.trim(s)
-   local from = s:match"^%s*()"
-   return from > #s and "" or s:match(".*%S", from)
+    local from = s:match"^%s*()"
+    return from > #s and "" or s:match(".*%S", from)
 end
+
+---- Variant tailored for text selection purposes (originally implemented in ReaderHighlight).
+---- @string text the text to be trimmed
+---- @treturn string trimmed text
+function util.cleanupSelectedText(text)
+    -- Trim spaces and new lines at start and end
+    text = text:gsub("^[\n%s]*", "")
+    text = text:gsub("[\n%s]*$", "")
+    -- Trim spaces around newlines
+    text = text:gsub("%s*\n%s*", "\n")
+    -- Trim consecutive spaces (that would probably have collapsed
+    -- in rendered CreDocuments)
+    text = text:gsub("%s%s+", " ")
+    return text
+end
+
+--[[
+-- Trim leading & trailing character `c` from string `s`
+function util.trim_char(s, c)
+    local from = s:match"^"..c.."*()"
+    return from > #s and "" or s:match(".*[^"..c.."]", from)
+end
+
+-- Trim trailing character `c` from string `s`
+function util.rtrim_char(s, c)
+    local n = #s
+    while n > 0 and s:find("^"..c, n) do
+        n = n - 1
+    end
+    return s:sub(1, n)
+end
+--]]
 
 --[[--
 Splits a string by a pattern
@@ -175,6 +208,52 @@ function util.tableSize(t)
     local count = 0
     for _ in pairs(t) do count = count + 1 end
     return count
+end
+
+--- Returns a value of a key, checks if all parent keys are not empty.
+---- @param t Lua table
+---- @param ... parent keys, starting from the upper level
+---- @treturn value of the last key or nil
+function util.tableGetValue(t, ...)
+    local keys = { ... }
+    local q = t
+    for _, key in ipairs(keys) do
+        if type(q) ~= "table" then return end
+        q = q[key]
+        if q == nil then return end
+    end
+    return q
+end
+
+--- Sets a value of a key, creates all parent keys if needed.
+---- @param t Lua table
+---- @param value value to be assigned to the last key
+---- @param ... parent keys, starting from the upper level
+function util.tableSetValue(t, value, ...)
+    local keys = { ... }
+    local q = t
+    for i = 1, #keys - 1 do
+        local key = keys[i]
+        q[key] = q[key] or {}
+        q = q[key]
+    end
+    q[keys[#keys]] = value
+end
+
+--- Removes a key in a table, removes all empty parent keys.
+---- @param t Lua table
+---- @param ... parent keys, starting from the upper level
+function util.tableRemoveValue(t, ...)
+    local keys = { ... }
+    for i = #keys, 1, -1 do
+        local q = t
+        for j = 1, i - 1 do
+            q = q[keys[j]]
+            if type(q) ~= "table" then return end
+        end
+        q[keys[i]] = nil
+        if next(q) ~= nil then break end
+    end
 end
 
 --- Append all elements from t2 into t1.
@@ -410,7 +489,7 @@ function util.splitToChars(text)
         local hi_surrogate
         local hi_surrogate_uchar
         for uchar in text:gmatch(util.UTF8_CHAR_PATTERN) do
-            charcode = BaseUtil.utf8charcode(uchar)
+            charcode = ffiUtil.utf8charcode(uchar)
             -- (not sure why we need this prevcharcode check; we could get
             -- charcode=nil with invalid UTF-8, but should we then really
             -- ignore the following charcode ?)
@@ -451,7 +530,7 @@ function util.isCJKChar(c)
     if #c < 3 then
         return false
     end
-    local code = BaseUtil.utf8charcode(c)
+    local code = ffiUtil.utf8charcode(c)
     -- The weird bracketing is intentional -- we use the lowest possible
     -- codepoint as a shortcut so if the codepoint is below U+1100 we
     -- immediately return false.
@@ -637,7 +716,7 @@ end
 
 --- Computes the currently available memory
 ---- @treturn tuple of ints: memavailable, memtotal (or nil, nil on unsupported platforms).
-function util:calcFreeMem()
+function util.calcFreeMem()
     local memtotal, memfree, memavailable, buffers, cached
 
     local meminfo = io.open("/proc/meminfo", "r")
@@ -704,7 +783,8 @@ end
 --- Recursively scan directory for files inside
 -- @string path
 -- @func callback(fullpath, name, attr)
-function util.findFiles(dir, cb)
+function util.findFiles(dir, cb, recursive)
+    recursive = recursive ~= false
     local function scan(current)
         local ok, iter, dir_obj = pcall(lfs.dir, current)
         if not ok then return end
@@ -713,7 +793,7 @@ function util.findFiles(dir, cb)
             -- lfs can return nil here, as it will follow symlinks!
             local attr = lfs.attributes(path) or {}
             if attr.mode == "directory" then
-                if f ~= "." and f ~= ".." then
+                if recursive and f ~= "." and f ~= ".." then
                     scan(path)
                 end
             elseif attr.mode == "file" or attr.mode == "link" then
@@ -755,6 +835,11 @@ end
 ---- @treturn bool
 function util.pathExists(path)
     return lfs.attributes(path, "mode") ~= nil
+end
+
+--- Checks if the given directory exists.
+function util.directoryExists(path)
+  return lfs.attributes(path, "mode") == "directory"
 end
 
 --- As `mkdir -p`.
@@ -810,7 +895,7 @@ function util.removePath(path)
             return nil, "Encountered a component that isn't a directory" .. " (removing `" .. component .. "` for `" .. path .. "`)"
         end
 
-        local parent = BaseUtil.dirname(component)
+        local parent = ffiUtil.dirname(component)
         component = parent
     until parent == "." or parent == "/"
     return true, nil
@@ -904,7 +989,7 @@ function util.getSafeFilename(str, path, limit, limit_ext)
     limit_ext = limit_ext or 10
 
     -- Always assume the worst on Android (#7837)
-    if path and not BaseUtil.isAndroid() then
+    if path and not ffiUtil.isAndroid() then
         local file_system = util.getFilesystemType(path)
         if file_system ~= "vfat" and file_system ~= "fuse.fsp" then
             replaceFunc = replaceSlashChar
@@ -1005,6 +1090,66 @@ function util.getFormattedSize(size)
     return s
 end
 
+--- Calculate partial digest of an open file. To the calculating mechanism itself,
+-- since only PDF documents could be modified by KOReader by appending data
+-- at the end of the files when highlighting, we use a non-even sampling
+-- algorithm which samples with larger weight at file head and much smaller
+-- weight at file tail, thus reduces the probability that appended data may change
+-- the digest value.
+-- Note that if PDF file size is around 1024, 4096, 16384, 65536, 262144
+-- 1048576, 4194304, 16777216, 67108864, 268435456 or 1073741824, appending data
+-- by highlighting in KOReader may change the digest value.
+function util.partialMD5(filepath)
+    if not filepath then return end
+    local file = io.open(filepath, "rb")
+    if not file then return end
+    local step, size = 1024, 1024
+    local update = md5()
+    for i = -1, 10 do
+        file:seek("set", lshift(step, 2*i))
+        local sample = file:read(size)
+        if sample then
+            update(sample)
+        else
+            break
+        end
+    end
+    file:close()
+    return update()
+end
+
+function util.readFromFile(filepath, mode)
+    if not filepath then return end
+    local file, err = io.open(filepath, mode)
+    if not file then
+        return nil, err
+    end
+    local data = file:read("*all")
+    file:close()
+    return data
+end
+
+function util.writeToFile(data, filepath, force_flush, lua_dofile_ready, directory_updated)
+    if not filepath then return end
+    if lua_dofile_ready then
+        local t = { "-- ", filepath, "\nreturn ", data, "\n" }
+        data = table.concat(t)
+    end
+    local file, err = io.open(filepath, "wb")
+    if not file then
+        return nil, err
+    end
+    file:write(data)
+    if force_flush then
+        ffiUtil.fsyncOpenedFile(file)
+    end
+    file:close()
+    if directory_updated then
+        ffiUtil.fsyncDirectory(filepath)
+    end
+    return true
+end
+
 --[[--
 Replaces invalid UTF-8 characters with a replacement string.
 
@@ -1092,6 +1237,11 @@ local HTML_ENTITIES_TO_UTF8 = {
     {"&lt;", "<"},
     {"&gt;", ">"},
     {"&quot;", '"'},
+    {"&lsquo;", '‘'},
+    {"&rsquo;", '’'},
+    {"&ldquo;", '“'},
+    {"&rdquo;", '”'},
+    {"&mdash;", '—'},
     {"&apos;", "'"},
     {"&nbsp;", "\u{00A0}"},
     {"&#(%d+);", function(x) return util.unicodeCodepointToUtf8(tonumber(x)) end},
@@ -1213,6 +1363,11 @@ function util.prettifyCSS(css_text, condensed)
             s = s:gsub(",", "\v")
             s = s:gsub(":", "\f")
             s = s:gsub(";", "\b")
+            return s
+        end)
+        -- Protect ',' inside () (ie. ":is(td, th)") by replacing them with rare control chars
+        css_text = css_text:gsub("%b()/", function(s)
+            s = s:gsub(",", "\v")
             return s
         end)
         -- Cleanup declarations (the most nested ones only, which may be
@@ -1355,7 +1510,10 @@ end
 -- @boolean case_sensitive
 -- @number start_pos Position number in text to start search from
 -- @treturn number Position number or 0 if not found
+-- @treturn table Text char list
+-- @treturn table Search string char list
 function util.stringSearch(txt, str, case_sensitive, start_pos)
+    start_pos = start_pos or 1
     if not case_sensitive then
         str = Utf8Proc.lowercase(util.fixUtf8(str, "?"))
     end
@@ -1381,7 +1539,9 @@ function util.stringSearch(txt, str, case_sensitive, start_pos)
             break
         end
     end
-    return char_pos
+    -- Returned charlists are used in TextViewer find,
+    -- to avoid double call of util.splitToChars()
+    return char_pos, txt_charlist, str_charlist
 end
 
 local WrappedFunction_mt = {
@@ -1466,6 +1626,24 @@ function util.wrapMethod(target_table, target_field_name, new_func, before_callb
     }, WrappedFunction_mt)
     target_table[target_field_name] = wrapped
     return wrapped
+end
+
+-- Round a given "num" to the decimal points of "points"
+-- (i.e. `round_decimal(0.000000001, 2)` will yield `0.00`)
+function util.round_decimal(num, points)
+    local op = 10 ^ points
+
+    return math.floor(num * op) / op
+end
+
+function util.which(command, path)
+    path = path or os.getenv("PATH") or ""
+    for p in path:gmatch("([^:]+)") do
+        p = p .. "/" .. command
+        if ffiUtil.isExecutable(p) then
+            return p
+        end
+    end
 end
 
 return util

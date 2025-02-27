@@ -145,8 +145,8 @@ function TouchMenuItem:init()
 
     self._underline_container = UnderlineContainer:new{
         vertical_align = "center",
-        dimen = self.dimen,
-        self.item_frame
+        dimen = self.dimen:copy(),
+        self.item_frame,
     }
 
     self[1] = self._underline_container
@@ -304,10 +304,10 @@ function TouchMenuBar:init()
     self.bar_icon_group = HorizontalGroup:new{}
     -- build up image widget for menu icon bar
     self.icon_widgets = {}
-    -- hold icon seperators
+    -- hold icon separators
     self.icon_seps = {}
     -- the start_seg for first icon_widget should be 0
-    -- we asign negative here to offset it in the loop
+    -- we assign negative here to offset it in the loop
     local start_seg = -icon_sep_width
     local end_seg = start_seg
     -- self.width is the screen width
@@ -483,7 +483,7 @@ function TouchMenu:init()
     -- borders are pushed off-(screen-)width and so not visible.
     -- We'll then be similar to bottom menu ConfigDialog (where this
     -- nice effect is caused by some width calculations bug).
-    if not self.dimen then self.dimen = Geom:new{} end
+    if not self.dimen then self.dimen = Geom:new() end
     self.show_parent = self.show_parent or self
     if not self.close_callback then
         self.close_callback = function()
@@ -511,6 +511,7 @@ function TouchMenu:init()
     }
 
     self.key_events.Back = { { Input.group.Back } }
+    self.key_events.Close = { { "Menu" } }
     if Device:hasFewKeys() then
         self.key_events.Back = { { "Left" } }
     end
@@ -783,7 +784,7 @@ function TouchMenu:switchMenuTab(tab_num)
         self.tab_item_table[tab_num].callback()
     end
 
-    -- It's like getting a new menu everytime we switch tab!
+    -- It's like getting a new menu every time we switch tab!
     -- Also, switching to the _same_ tab resets the stack and takes us back to
     -- the top of the menu tree
     self.page = 1
@@ -920,13 +921,16 @@ function TouchMenu:onMenuSelect(item, tap_on_checkmark)
                 -- must set keep_menu_open=true if that is wished)
                 callback(self)
                 if refresh then
-                    self:updateItems()
+                    if not item.no_refresh_on_check then
+                        self:updateItems()
+                    end
                 elseif not item.keep_menu_open then
                     self:closeMenu()
                 end
             end
         else
             table.insert(self.item_table_stack, self.item_table)
+            item.menu_item_id = item.menu_item_id or tostring(item) -- unique id
             self.parent_id = item.menu_item_id
             self.item_table = sub_item_table
             self.page = 1
@@ -1090,7 +1094,7 @@ function TouchMenu:openMenu(path, with_animation)
 
     local function walkStep()
         walkStep_scheduled = false
-        -- Default delay if not overriden (-1 means no scheduleIn() so no refresh, 0 means nextTick)
+        -- Default delay if not overridden (-1 means no scheduleIn() so no refresh, 0 means nextTick)
         local next_delay = with_animation and 1 or -1
         if step == STEPS.START then
             -- Ensure some initial delay so search dialog and result list can be closed and refreshed
@@ -1222,7 +1226,7 @@ function TouchMenu:openMenu(path, with_animation)
         end,
         resend_event = not with_animation, -- if not animation, don't eat the tap
     }
-    UIManager:show(trap_widget) -- catch taps during animaton
+    UIManager:show(trap_widget) -- catch taps during animation
 
     -- Call it: it will reschedule itself if animation; if not, it will
     -- just execute itself without pause until done.

@@ -39,9 +39,6 @@ describe("PDF document module", function()
         local clip1 = doc:clipPagePNGString(pos0, pos1, pboxes, "lighten")
         assert.truthy(clip1)
     end)
-    it("should calculate fast digest", function()
-        assert.is_equal(doc:fastDigest(), "41cce710f34e5ec21315e19c99821415")
-    end)
     it("should close document", function()
         doc:close()
     end)
@@ -58,22 +55,25 @@ describe("EPUB document module", function()
 
     local doc
     it("should open document", function()
-        local sample_epub = "spec/front/unit/data/leaves.epub"
-        doc = DocumentRegistry:openDocument(sample_epub)
+        doc = DocumentRegistry:openDocument("spec/front/unit/data/juliet.epub")
         assert.truthy(doc)
     end)
     it("should get cover image", function()
         local image = doc:getCoverPageImage()
         assert.truthy(image)
-        assert.are.same(image:getWidth(), 442)
-        assert.are.same(image:getHeight(), 616)
-    end)
-    it("should calculate fast digest", function()
-        assert.is_equal(doc:fastDigest(), "59d481d168cca6267322f150c5f6a2a3")
+        assert.are.same(520, image:getWidth())
+        assert.are.same(800, image:getHeight())
     end)
     it("should register droid sans fallback", function()
         local face_list = cre.getFontFaces()
-        assert.is_equal(face_list[1], "Droid Sans Mono")
+        local has_droid_sans = false
+        for i, v in ipairs(face_list) do
+            if v == "Droid Sans Mono" then
+                has_droid_sans = true
+                break
+            end
+        end
+        assert.is_true(has_droid_sans)
         assert.is_true(#face_list >= 10)
     end)
     it("should close document", function()

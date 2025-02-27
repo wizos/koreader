@@ -11,7 +11,7 @@ Example:
     local sample
     sample = InfoMessage:new{
         text = _("Some message"),
-        -- Usually the hight of a InfoMessage is self-adaptive. If this field is actively set, a
+        -- Usually the height of a InfoMessage is self-adaptive. If this field is actively set, a
         -- scrollbar may be shown. This variable is usually helpful to display a large chunk of text
         -- which may exceed the height of the screen.
         height = Screen:scaleBySize(400),
@@ -46,11 +46,14 @@ local Screen = Device.screen
 
 local InfoMessage = InputContainer:extend{
     modal = true,
-    face = Font:getFace("infofont"),
+    face = nil,
+    monospace_font = false,
     text = "",
     timeout = nil, -- in seconds
+    _timeout_func = nil,
     width = nil,  -- The width of the InfoMessage. Keep it nil to use default value.
     height = nil,  -- The height of the InfoMessage. If this field is set, a scrollbar may be shown.
+    force_one_line = false,  -- Attempt to show text in one single line. This setting and height are not to be used conjointly.
     -- The image shows at the left of the InfoMessage. Image data will be freed
     -- by InfoMessage, caller should not manage its lifecycle
     image = nil,
@@ -77,6 +80,10 @@ local InfoMessage = InputContainer:extend{
 }
 
 function InfoMessage:init()
+    if not self.face then
+        self.face = Font:getFace(self.monospace_font and "infont" or "infofont")
+    end
+
     if self.dismissable then
         if Device:hasKeys() then
             self.key_events.AnyKeyPressed = { { Input.group.Any } }
@@ -163,15 +170,26 @@ function InfoMessage:init()
     }
     self.movable = MovableContainer:new{
         frame,
+        unmovable = self.unmovable,
     }
     self[1] = CenterContainer:new{
         dimen = Screen:getSize(),
         self.movable,
     }
+
     if not self.height then
-        -- Reduce font size until widget fit screen height if needed
+        local max_height
+        if self.force_one_line and not self.text:find("\n") then
+            local icon_height = self.show_icon and image_widget:getSize().h or 0
+            -- Calculate the size of the frame container when it's only displaying one line.
+            max_height = math.max(text_widget:getLineHeight(), icon_height) + 2*frame.bordersize + 2*frame.padding
+        else
+            max_height = Screen:getHeight() * 0.95
+        end
+
+        -- Reduce font size if the text is too long
         local cur_size = frame:getSize()
-        if cur_size and cur_size.h > 0.95 * Screen:getHeight() then
+        if cur_size and cur_size.h > max_height then
             local orig_font = text_widget.face.orig_font
             local orig_size = text_widget.face.orig_size
             local real_size = text_widget.face.size
@@ -200,10 +218,24 @@ function InfoMessage:init()
 end
 
 function InfoMessage:onCloseWidget()
+    -- If we were closed early, drop the scheduled timeout
+    if self._timeout_func then
+        UIManager:unschedule(self._timeout_func)
+        self._timeout_func = nil
+    end
+
     if self._delayed_show_action then
         UIManager:unschedule(self._delayed_show_action)
         self._delayed_show_action = nil
     end
+    if self.dismiss_callback then
+        self.dismiss_callback()
+        -- NOTE: Dirty hack for Trapper, which needs to pull a Lazarus on dead widgets while preserving the callback's integrity ;).
+        if not self.is_infomessage then
+            self.dismiss_callback = nil
+        end
+    end
+
     if self.invisible then
         -- Still invisible, no setDirty needed
         return
@@ -237,16 +269,13 @@ function InfoMessage:onShow()
         -- Discard queued and upcoming input events to avoid accidental dismissal
         Input:inhibitInputUntil(true)
     end
-    -- schedule us to close ourself if timeout provided
+    -- schedule a close on timeout, if any
     if self.timeout then
-        UIManager:scheduleIn(self.timeout, function()
-            -- In case we're provided with dismiss_callback, also call it on timeout
-            if self.dismiss_callback then
-                self.dismiss_callback()
-                self.dismiss_callback = nil
-            end
+        self._timeout_func = function()
+            self._timeout_func = nil
             UIManager:close(self)
-        end)
+        end
+        UIManager:scheduleIn(self.timeout, self._timeout_func)
     end
     return true
 end
@@ -264,20 +293,8 @@ function InfoMessage:paintTo(bb, x, y)
     InputContainer.paintTo(self, bb, x, y)
 end
 
-function InfoMessage:dismiss()
-    if self._delayed_show_action then
-        UIManager:unschedule(self._delayed_show_action)
-        self._delayed_show_action = nil
-    end
-    if self.dismiss_callback then
-        self.dismiss_callback()
-        self.dismiss_callback = nil
-    end
-    UIManager:close(self)
-end
-
 function InfoMessage:onTapClose()
-    self:dismiss()
+    UIManager:close(self)
     if self.readonly ~= true then
         return true
     end

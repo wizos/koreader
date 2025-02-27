@@ -97,6 +97,10 @@ function SyncService.getReadablePath(server)
     return url
 end
 
+function SyncService.removeLastSyncDB(path)
+    os.remove(path .. ".sync")
+end
+
 -- Prepares three files for sync_cb to call to do the actual syncing:
 -- * local_file (one that is being used)
 -- * income_file (one that has just been downloaded from Cloud to be merged, then to be deleted)
@@ -118,9 +122,17 @@ end
 -- and renamed to replace the old cached file (thus the naming). The cached file stays (in the same folder) till being replaced
 -- in the next round.
 function SyncService.sync(server, file_path, sync_cb, is_silent)
-    if NetworkMgr:willRerunWhenOnline(function() SyncService.sync(server, file_path, sync_cb, is_silent) end) then
-        return
+    if server.type == "dropbox" then
+        if NetworkMgr:willRerunWhenOnline(function() SyncService.sync(server, file_path, sync_cb, is_silent) end) then
+            return
+        end
+    else
+        -- NOTE: Align behavior with CloudStorage:openCloudServer, where only Dropbox requires isOnline
+        if NetworkMgr:willRerunWhenConnected(function() SyncService.sync(server, file_path, sync_cb, is_silent) end) then
+            return
+        end
     end
+
     local file_name = ffiutil.basename(file_path)
     local income_file_path = file_path .. ".temp" -- file downloaded from server
     local cached_file_path = file_path .. ".sync" -- file uploaded to server last time
