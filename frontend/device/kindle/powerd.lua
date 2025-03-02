@@ -14,7 +14,7 @@ local KindlePowerD = BasePowerD:new{
 
 function KindlePowerD:init()
     local haslipc, lipc = pcall(require, "liblipclua")
-    if haslipc and lipc then
+    if haslipc then
         self.lipc_handle = lipc.init("com.github.koreader.kindlepowerd")
     end
 
@@ -29,17 +29,22 @@ end
 
 -- If we start with the light off (fl_intensity is fl_min), ensure a toggle will set it to the lowest "on" step,
 -- and that we update fl_intensity (by using setIntensity and not setIntensityHW).
-function KindlePowerD:turnOnFrontlightHW()
+function KindlePowerD:turnOnFrontlightHW(done_callback)
     self:setIntensity(self.fl_intensity == self.fl_min and self.fl_min + 1 or self.fl_intensity)
+
+    return false
 end
 -- Which means we need to get rid of the insane fl_intensity == fl_min shortcut in turnOnFrontlight, too...
 -- That dates back to #2941, and I have no idea what it's supposed to help with.
-function BasePowerD:turnOnFrontlight()
+function KindlePowerD:turnOnFrontlight(done_callback)
     if not self.device:hasFrontlight() then return end
     if self:isFrontlightOn() then return false end
-    self:turnOnFrontlightHW()
+    local cb_handled = self:turnOnFrontlightHW(done_callback)
     self.is_fl_on = true
     self:stateChanged()
+    if not cb_handled and done_callback then
+        done_callback()
+    end
     return true
 end
 
@@ -79,6 +84,14 @@ function KindlePowerD:frontlightIntensityHW()
     end
 end
 
+-- Make sure isFrontlightOn reflects the actual HW state,
+-- as self.fl_intensity is kept as-is when toggling the light off,
+-- in order to be able to toggle it back on at the right intensity.
+function KindlePowerD:isFrontlightOnHW()
+    local hw_intensity = self:frontlightIntensityHW()
+    return hw_intensity > self.fl_min
+end
+
 function KindlePowerD:setIntensityHW(intensity)
     -- Handle the synthetic step switcheroo on ! canTurnFrontlightOff devices...
     local turn_it_off = false
@@ -108,6 +121,9 @@ function KindlePowerD:setIntensityHW(intensity)
             ffiUtil.writeToSysfs(intensity, self.warmth_intensity_file)
         end
     end
+
+    -- The state might have changed, make sure we don't break isFrontlightOn
+    self:_decideFrontlightState()
 end
 
 function KindlePowerD:frontlightWarmthHW()
@@ -173,29 +189,21 @@ function KindlePowerD:isHallSensorEnabled()
     return int == 1
 end
 
-function KindlePowerD:onToggleHallSensor()
-    local stat = self:isHallSensorEnabled()
-    ffiUtil.writeToSysfs(stat and 0 or 1, self.hall_file)
+function KindlePowerD:onToggleHallSensor(toggle)
+    if toggle == nil then
+        -- Flip it
+        toggle = self:isHallSensorEnabled() and 0 or 1
+    else
+        -- Honor the requested state
+        toggle = toggle and 1 or 0
+    end
+    ffiUtil.writeToSysfs(toggle, self.hall_file)
+
+    G_reader_settings:saveSetting("kindle_hall_effect_sensor_enabled", toggle == 1 and true or false)
 end
 
 function KindlePowerD:_readFLIntensity()
     return self:read_int_file(self.fl_intensity_file)
-end
-
-function KindlePowerD:afterResume()
-    if not self.device:hasFrontlight() then
-        return
-    end
-    if self:isFrontlightOn() then
-        -- The Kindle framework should turn the front light back on automatically.
-        -- The following statement ensures consistency of intensity, but should basically always be redundant,
-        -- since we set intensity via lipc and not sysfs ;).
-        -- NOTE: This is race-y, and we want to *lose* the race, hence the use of the scheduler (c.f., #4392)
-        UIManager:tickAfterNext(function() self:turnOnFrontlightHW() end)
-    else
-        -- But in the off case, we *do* use sysfs, so this one actually matters.
-        UIManager:tickAfterNext(function() self:turnOffFrontlightHW() end)
-    end
 end
 
 function KindlePowerD:toggleSuspend()
@@ -230,11 +238,11 @@ function KindlePowerD:checkUnexpectedWakeup()
     if self.device.wakeup_mgr:isWakeupAlarmScheduled() and self.device.wakeup_mgr:wakeupAction(90) then
         logger.info("Kindle scheduled wakeup")
     else
-        logger.warn("Kindle unscheduled wakeup")
+        logger.info("Kindle unscheduled wakeup")
     end
 end
 
--- Dummy fuctions. They will be defined in initWakeupMgr
+-- Dummy functions. They will be defined in initWakeupMgr
 function KindlePowerD:wakeupFromSuspend() end
 function KindlePowerD:readyToSuspend() end
 
@@ -243,8 +251,7 @@ function KindlePowerD:initWakeupMgr()
     if not self.device:supportsScreensaver() then return end
     if self.lipc_handle == nil then return end
 
-    function KindlePowerD:wakeupFromSuspend()
-        logger.dbg("Kindle wakeupFromSuspend")
+    function KindlePowerD:wakeupFromSuspend(ts)
         -- Give the device a few seconds to settle.
         -- This filters out user input resumes -> device will resume to active
         -- Also the Kindle stays in Ready to suspend for 10 seconds
@@ -252,8 +259,7 @@ function KindlePowerD:initWakeupMgr()
         UIManager:scheduleIn(15, self.checkUnexpectedWakeup, self)
     end
 
-    function KindlePowerD:readyToSuspend()
-        logger.dbg("Kindle readyToSuspend")
+    function KindlePowerD:readyToSuspend(delay)
         if self.device.wakeup_mgr:isWakeupAlarmScheduled() then
             local now = os.time()
             local alarm = self.device.wakeup_mgr:getWakeupAlarmEpoch()
@@ -293,6 +299,20 @@ function KindlePowerD:afterResume()
 
     -- Restore user input and emit the Resume event.
     self.device:_afterResume()
+
+    if not self.device:hasFrontlight() then
+        return
+    end
+    if self:isFrontlightOn() then
+        -- The Kindle framework should turn the front light back on automatically.
+        -- The following statement ensures consistency of intensity, but should basically always be redundant,
+        -- since we set intensity via lipc and not sysfs ;).
+        -- NOTE: This is race-y, and we want to *lose* the race, hence the use of the scheduler (c.f., #4392)
+        UIManager:tickAfterNext(function() self:turnOnFrontlightHW() end)
+    else
+        -- But in the off case, we *do* use sysfs, so this one actually matters.
+        UIManager:tickAfterNext(function() self:turnOffFrontlightHW() end)
+    end
 end
 
 function KindlePowerD:UIManagerReadyHW(uimgr)

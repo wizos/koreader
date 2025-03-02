@@ -25,7 +25,6 @@ local function validDjvuFile(filename)
 end
 
 function DjvuDocument:init()
-    self:updateColorRendering()
     local djvu = require("libs/libkoreader-djvu")
     self.koptinterface = require("document/koptinterface")
     self.koptinterface:setDefaultConfigurable(self.configurable)
@@ -38,9 +37,11 @@ function DjvuDocument:init()
     if not ok then
         error(self._document)  -- will contain error message
     end
+    self:updateColorRendering()
     self.is_open = true
     self.info.has_pages = true
     self.info.configurable = true
+    self.render_mode = 0
     self:_readMetadata()
 end
 
@@ -123,20 +124,24 @@ function DjvuDocument:getCoverPageImage()
     return self.koptinterface:getCoverPageImage(self)
 end
 
-function DjvuDocument:findText(pattern, origin, reverse, caseInsensitive, page)
-    return self.koptinterface:findText(self, pattern, origin, reverse, caseInsensitive, page)
+function DjvuDocument:findText(pattern, origin, reverse, case_insensitive, page)
+    return self.koptinterface:findText(self, pattern, origin, reverse, case_insensitive, page)
 end
 
-function DjvuDocument:renderPage(pageno, rect, zoom, rotation, gamma, render_mode, hinting)
-    return self.koptinterface:renderPage(self, pageno, rect, zoom, rotation, gamma, render_mode, hinting)
+function DjvuDocument:findAllText(pattern, case_insensitive, nb_context_words, max_hits)
+    return self.koptinterface:findAllText(self, pattern, case_insensitive, nb_context_words, max_hits)
 end
 
-function DjvuDocument:hintPage(pageno, zoom, rotation, gamma, render_mode)
-    return self.koptinterface:hintPage(self, pageno, zoom, rotation, gamma, render_mode)
+function DjvuDocument:renderPage(pageno, rect, zoom, rotation, gamma, hinting)
+    return self.koptinterface:renderPage(self, pageno, rect, zoom, rotation, gamma, hinting)
 end
 
-function DjvuDocument:drawPage(target, x, y, rect, pageno, zoom, rotation, gamma, render_mode)
-    return self.koptinterface:drawPage(self, target, x, y, rect, pageno, zoom, rotation, gamma, render_mode)
+function DjvuDocument:hintPage(pageno, zoom, rotation, gamma)
+    return self.koptinterface:hintPage(self, pageno, zoom, rotation, gamma)
+end
+
+function DjvuDocument:drawPage(target, x, y, rect, pageno, zoom, rotation, gamma)
+    return self.koptinterface:drawPage(self, target, x, y, rect, pageno, zoom, rotation, gamma)
 end
 
 function DjvuDocument:register(registry)

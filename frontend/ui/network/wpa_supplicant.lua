@@ -2,16 +2,37 @@
 WPA client helper for Kobo.
 ]]
 
+local crypto = require("ffi/crypto")
+local bin_to_hex = require("ffi/sha2").bin_to_hex
 local FFIUtil = require("ffi/util")
 local InfoMessage = require("ui/widget/infomessage")
 local WpaClient = require("lj-wpaclient/wpaclient")
 local UIManager = require("ui/uimanager")
+local logger = require("logger")
+local util = require("util")
 local _ = require("gettext")
 local T = FFIUtil.template
 
 local CLIENT_INIT_ERR_MSG = _("Failed to initialize network control client: %1.")
 
 local WpaSupplicant = {}
+
+local function decodeSSID(ssid)
+    local decode = function(b)
+        local c = string.char(tonumber(b, 16))
+        -- This is a hack that allows us to make sure that any decoded backslash
+        -- does not get replaced in the step that replaces double backslashes.
+        if c == "\\" then
+            return "\\\\"
+        else
+            return c
+        end
+    end
+
+    local decoded = ssid:gsub("%f[\\]\\x(%x%x)", decode)
+    decoded = decoded:gsub("\\\\", "\\")
+    return decoded
+end
 
 --- Gets network list.
 function WpaSupplicant:getNetworkList()
@@ -31,33 +52,28 @@ function WpaSupplicant:getNetworkList()
     local curr_network = self:getCurrentNetwork()
 
     for _, network in ipairs(list) do
+        network.ssid = decodeSSID(network.ssid)
         network.signal_quality = network:getSignalQuality()
         local saved_nw = saved_networks:readSetting(network.ssid)
         if saved_nw then
-            --- @todo verify saved_nw.flags == network.flags? This will break if user changed the
-            -- network setting from [WPA-PSK-TKIP+CCMP][WPS][ESS] to [WPA-PSK-TKIP+CCMP][ESS]
+            --- @todo verify saved_nw.flags == network.flags?
+            -- This will break if user changed the network setting, e.g.,
+            -- from [WPA-PSK-TKIP+CCMP][WPS][ESS]
+            --   to [WPA-PSK-TKIP+CCMP][ESS]
             network.password = saved_nw.password
             network.psk = saved_nw.psk
         end
-        --- @todo also verify bssid if it is not set to any
-        if curr_network and curr_network.ssid == network.ssid then
+        if curr_network and curr_network.ssid == network.ssid and (curr_network.bssid == "any" or curr_network.bssid == network.bssid) then
             network.connected = true
             network.wpa_supplicant_id = curr_network.id
+            logger.dbg("WpaSupplicant:getNetworkList: automatically connected to network", util.fixUtf8(curr_network.ssid, "�"))
         end
     end
     return list
 end
 
 local function calculatePsk(ssid, pwd)
-    --- @todo calculate PSK with native function instead of shelling out
-    -- hostap's reference implementation is available at:
-    --   * /wpa_supplicant/wpa_passphrase.c
-    --   * /src/crypto/sha1-pbkdf2.c
-    -- see: <http://docs.ros.org/diamondback/api/wpa_supplicant/html/sha1-pbkdf2_8c_source.html>
-    local fp = io.popen(("wpa_passphrase %q %q"):format(ssid, pwd))
-    local out = fp:read("*a")
-    fp:close()
-    return string.match(out, "psk=([a-f0-9]+)")
+    return bin_to_hex(crypto.pbkdf2_hmac_sha1(pwd, ssid, 4096, 32))
 end
 
 --- Authenticates network.
@@ -75,7 +91,7 @@ function WpaSupplicant:authenticateNetwork(network)
     end
     local nw_id = reply
 
-    reply, err = wcli:setNetwork(nw_id, "ssid", string.format("\"%s\"", network.ssid))
+    reply, err = wcli:setNetwork(nw_id, "ssid", bin_to_hex(network.ssid))
     if reply == nil or reply == "FAIL" then
         wcli:removeNetwork(nw_id)
         return false, T("An error occurred while selecting network: %1.", err)
@@ -117,7 +133,7 @@ function WpaSupplicant:authenticateNetwork(network)
         local connected, state = wcli:getConnectedNetwork()
         if connected then
             network.wpa_supplicant_id = connected.id
-            network.ssid = connected.ssid
+            network.ssid = decodeSSID(connected.ssid)
             success = true
             break
         else
@@ -183,13 +199,39 @@ function WpaSupplicant:getCurrentNetwork()
     if wcli == nil then
         return nil, T(CLIENT_INIT_ERR_MSG, err)
     end
-    local nw = wcli:getCurrentNetwork()
+
+    -- Start by checking the status before looking for the CURRENT flag...
+    local nw
+    nw, err = wcli:getConnectedNetwork()
+    logger.dbg("WpaSupplicant:getCurrentNetwork: Connected network:", nw and nw or err)
+    -- Then fall back to the flag check...
+    if nw == nil then
+        nw, err = wcli:getCurrentNetwork()
+        logger.dbg("WpaSupplicant:getCurrentNetwork: Current network:", nw and nw or err)
+    end
     wcli:close()
+    if nw ~= nil then
+        nw.ssid = decodeSSID(nw.ssid)
+    end
     return nw
+end
+
+function WpaSupplicant:getConfiguredNetworks()
+    local wcli, err = WpaClient.new(self.wpa_supplicant.ctrl_interface)
+    if wcli == nil then
+        return nil, T(CLIENT_INIT_ERR_MSG, err)
+    end
+
+    local nw
+    nw, err = wcli:listNetworks()
+    wcli:close()
+
+    return nw, err
 end
 
 function WpaSupplicant.init(network_mgr, options)
     network_mgr.wpa_supplicant = {ctrl_interface = options.ctrl_interface}
+    network_mgr.getConfiguredNetworks = WpaSupplicant.getConfiguredNetworks
     network_mgr.getNetworkList = WpaSupplicant.getNetworkList
     network_mgr.getCurrentNetwork = WpaSupplicant.getCurrentNetwork
     network_mgr.authenticateNetwork = WpaSupplicant.authenticateNetwork

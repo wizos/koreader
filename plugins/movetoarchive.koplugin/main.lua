@@ -5,10 +5,10 @@ local DocSettings = require("docsettings")
 local Event = require("ui/event")
 local FileManager = require("apps/filemanager/filemanager")
 local InfoMessage = require("ui/widget/infomessage")
-local LuaSettings = require("frontend/luasettings")
+local LuaSettings = require("luasettings")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local util = require("frontend/util")
+local util = require("util")
 local BaseUtil = require("ffi/util")
 local _ = require("gettext")
 
@@ -50,7 +50,7 @@ function MoveToArchive:addToMainMenu(menu_items)
             {
                 text = _("Go to archive folder"),
                 callback = function()
-                    if self.archive_dir_path then
+                    if self.archive_dir_path and util.directoryExists(self.archive_dir_path) then
                         self:openFileBrowser(self.archive_dir_path)
                     else
                         self:showNoArchiveConfirmBox()
@@ -103,10 +103,10 @@ function MoveToArchive:onMoveToArchive(do_copy)
     else
         text = _("Book moved.\nDo you want to open it from the archive folder?")
         FileManager:moveFile(document_full_path, self.archive_dir_path)
-        require("readhistory"):updateItemByPath(document_full_path, dest_file) -- (will update "lastfile" if needed)
-        require("readcollection"):updateItemByPath(document_full_path, dest_file)
+        require("readhistory"):updateItem(document_full_path, dest_file) -- (will update "lastfile" if needed)
+        require("readcollection"):updateItem(document_full_path, dest_file)
     end
-    DocSettings:updateLocation(document_full_path, dest_file, do_copy)
+    DocSettings.updateLocation(document_full_path, dest_file, do_copy)
     UIManager:show(ConfirmBox:new{
         text = text,
         ok_callback = function()

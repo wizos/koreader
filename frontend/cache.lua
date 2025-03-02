@@ -1,6 +1,8 @@
---[[
-A LRU cache, based on https://github.com/starius/lua-lru
-]]--
+--[[--
+An LRU cache, based on https://github.com/starius/lua-lru
+
+@module cache
+--]]
 
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
@@ -136,8 +138,8 @@ function Cache:get(key)
 end
 
 function Cache:willAccept(size)
-    -- We only allow a single object to fill 75% of the cache
-    return size*4 < self.size*3
+    -- We only allow a single object to fill 50% of the cache
+    return size*4 < self.size*2
 end
 
 -- Blank the cache

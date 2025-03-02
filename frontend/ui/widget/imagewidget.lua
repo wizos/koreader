@@ -22,7 +22,6 @@ Show image from memory example:
 
 local Blitbuffer = require("ffi/blitbuffer")
 local Cache = require("cache")
-local DocumentRegistry = require("document/documentregistry")
 local Geom = require("ui/geometry")
 local RenderImage = require("ui/renderimage")
 local Screen = require("device").screen
@@ -75,6 +74,7 @@ local ImageWidget = Widget:extend{
     dim = nil,
     alpha = false, -- honors alpha values from the image
     is_icon = false, -- set to true by sub-class IconWidget
+    original_in_nightmode = true, -- defaults to display the original image colors in nightmode
 
     -- When rotation_angle is not 0, native image is rotated by this angle
     -- before scaling.
@@ -88,7 +88,7 @@ local ImageWidget = Widget:extend{
     --   Special case: scale_factor == 0 : image will be scaled to best fit provided
     --   width and height, keeping aspect ratio (scale_factor will be updated
     --   from 0 to the factor used at _render() time)
-    -- If scale_factor is nil and stretch_limit_percantage is provided:
+    -- If scale_factor is nil and stretch_limit_percentage is provided:
     --   If the aspect ratios of the image and the width/height provided don't differ by more than
     --   stretch_limit_percentage, then stretch the image (as scale_factor=nil);
     --   otherwise, scale to best fit (as scale_factor=0)
@@ -113,7 +113,7 @@ local ImageWidget = Widget:extend{
     _max_off_center_y_ratio = 0,
 
     -- So we can reset self.scale_factor to its initial value in free(), in
-    -- case this same object is free'd but re-used and and re-render'ed
+    -- case this same object is free'd but re-used and re-render'ed
     _initial_scale_factor = nil,
 
     _bb = nil,
@@ -131,6 +131,7 @@ function ImageWidget:_loadimage()
 end
 
 function ImageWidget:_loadfile()
+    local DocumentRegistry = require("document/documentregistry")
     if DocumentRegistry:isImageFile(self.file) then
         -- In our use cases for files (icons), we either provide width and height,
         -- or just scale_for_dpi, and scale_factor should stay nil.
@@ -139,11 +140,11 @@ function ImageWidget:_loadfile()
         -- and use them in cache hash, when self.scale_factor is nil, when we are sure
         -- we don't need to keep aspect ratio.
         local width, height
-        if self.scale_factor == nil then
+        if self.scale_factor == nil and self.stretch_limit_percentage == nil then
             width = self.width
             height = self.height
         end
-        local hash = "image|"..self.file.."|"..(width or "").."|"..(height or "")..tostring(self.alpha)
+        local hash = "image|"..self.file.."|"..tostring(width).."|"..tostring(height).."|"..(self.alpha and "alpha" or "flat")
         -- Do the scaling for DPI here, so it can be cached and not re-done
         -- each time in _render() (but not if scale_factor, to avoid double scaling)
         local scale_for_dpi_here = false
@@ -283,7 +284,7 @@ function ImageWidget:_render()
             -- we get corrupted images when using it for scaling such blitbuffers.
             -- We need to make a real new blitbuffer with rotated content:
             local rot_bb = self._bb:rotatedCopy(self.rotation_angle)
-            -- We made a new blitbuffer, we need to explicitely free
+            -- We made a new blitbuffer, we need to explicitly free
             -- the old one to not leak memory
             if self._bb_disposable then
                 self._bb:free()
@@ -329,7 +330,7 @@ function ImageWidget:_render()
 
     -- replace blitbuffer with a resized one if needed
     if self.scale_factor == nil then
-        -- no scaling, but strech to width and height, only if provided and needed
+        -- no scaling, but stretch to width and height, only if provided and needed
         if self.width and self.height and (self.width ~= bb_w or self.height ~= bb_h) then
             logger.dbg("ImageWidget: stretching")
             self._bb = RenderImage:scaleBlitBuffer(self._bb, self.width, self.height, self._bb_disposable)
@@ -479,6 +480,10 @@ function ImageWidget:getPanByCenterRatio(x, y)
 end
 
 function ImageWidget:panBy(x, y)
+    if not self._bb then
+        return
+    end
+
     -- update center ratio from new offset
     self.center_x_ratio = (x + self._offset_x + self.width/2) / self._bb_w
     self.center_y_ratio = (y + self._offset_y + self.height/2) / self._bb_h
@@ -514,11 +519,16 @@ function ImageWidget:paintTo(bb, x, y)
     if self.hide then return end
     -- self:_render is called in getSize method
     local size = self:getSize()
-    self.dimen = Geom:new{
-        x = x, y = y,
-        w = size.w,
-        h = size.h
-    }
+    if not self.dimen then
+        self.dimen = Geom:new{
+            x = x, y = y,
+            w = size.w,
+            h = size.h
+        }
+    else
+        self.dimen.x = x
+        self.dimen.y = y
+    end
     logger.dbg("blitFrom", x, y, self._offset_x, self._offset_y, size.w, size.h)
     local do_alpha = false
     if self.alpha == true then
@@ -568,29 +578,31 @@ function ImageWidget:paintTo(bb, x, y)
     ---        This would require the *original* transparent icon, not the flattened one in the cache.
     ---        c.f., https://github.com/koreader/koreader/pull/6937#issuecomment-748372429 for a PoC
     if self.dim then
-        bb:dimRect(x, y, size.w, size.h)
+        bb:lightenRect(x, y, size.w, size.h)
     end
     -- In night mode, invert all rendered images, so the original is
     -- displayed when the whole screen is inverted by night mode.
     -- Except for our *black & white* icons: we do *NOT* want to invert them again:
-    -- they should match the UI's text/backgound.
+    -- they should match the UI's text/background.
     --- @note: As for *color* icons, we really *ought* to invert them here,
     ---        but we currently don't, as we don't really trickle down
     ---        a way to discriminate them from the B&W ones.
     ---        Currently, this is *only* the KOReader icon in Help, AFAIK.
-    if Screen.night_mode and not self.is_icon then
+    if Screen.night_mode and self.original_in_nightmode and not self.is_icon then
         bb:invertRect(x, y, size.w, size.h)
     end
 end
 
 -- This will normally be called by our WidgetContainer:free()
--- But it SHOULD explicitely be called if we are getting replaced
+-- But it SHOULD explicitly be called if we are getting replaced
 -- (ie: in some other widget's update()), to not leak memory with
 -- BlitBuffer zombies
 function ImageWidget:free()
     --print("ImageWidget:free on", self, "for BB?", self._bb, self._bb_disposable)
-    if self._bb and self._bb_disposable and self._bb.free then
-        self._bb:free()
+    if self._bb then
+        if self._bb_disposable and self._bb.free then
+            self._bb:free()
+        end
         self._bb = nil
     end
     -- reset self.scale_factor to its initial value, in case

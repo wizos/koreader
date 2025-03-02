@@ -84,9 +84,9 @@ local LANGUAGES = {
     { "pt-BR",                 {},   "HB  ",   _("Portuguese (BR)"),        "Portuguese_BR.pattern" },
     { "rm",               {"roh"},   "H   ",   _("Romansh"),                "Romansh.pattern" },
     { "ro",               {"ron"},   "H   ",   _("Romanian"),               "Romanian.pattern" },
-    { "ru",               {"rus"},   "Hb  ",   _("Russian"),                "Russian.pattern" },
-    { "ru-GB",                 {},   "Hb  ",   _("Russian + English (UK)"), "Russian_EnGB.pattern" },
-    { "ru-US",                 {},   "Hb  ",   _("Russian + English (US)"), "Russian_EnUS.pattern" },
+    { "ru",               {"rus"},   "HB  ",   _("Russian"),                "Russian.pattern" },
+    { "ru-GB",                 {},   "HB  ",   _("Russian + English (UK)"), "Russian_EnGB.pattern" },
+    { "ru-US",                 {},   "HB  ",   _("Russian + English (US)"), "Russian_EnUS.pattern" },
     { "sr",               {"srp"},   "HB  ",   _("Serbian"),                "Serbian.pattern" },
     { "sk",               {"slk"},   "HB  ",   _("Slovak"),                 "Slovak.pattern" },
     { "sl",               {"slv"},   "H   ",   _("Slovenian"),              "Slovenian.pattern" },
@@ -151,7 +151,7 @@ When the book's language tag is not among our presets, no specific features will
         hold_callback = function()
             -- Show infos about TextLangMan seen lang_tags and loaded hyph dicts
             local lang_infos = {}
-            local seen_hyph_dicts = {} -- to avoid outputing count and size for shared hyph dicts
+            local seen_hyph_dicts = {} -- to avoid outputting count and size for shared hyph dicts
             local cre = require("document/credocument"):engineInit()
             local main_lang_tag, main_lang_active_hyph_dict, loaded_lang_infos = cre.getTextLangStatus() -- luacheck: no unused
             -- First output main lang tag
@@ -197,11 +197,10 @@ When the book's language tag is not among our presets, no specific features will
             -- Text might be too long for InfoMessage
             local status_text = table.concat(lang_infos, "\n")
             local TextViewer = require("ui/widget/textviewer")
-            local Font = require("ui/font")
             UIManager:show(TextViewer:new{
                 title = _("Language tags (and hyphenation dictionaries) used since start up"),
                 text = status_text,
-                text_face = Font:getFace("smallinfont"),
+                text_type = "code",
                 height = math.floor(Screen:getHeight() * 0.8),
             })
         end,
@@ -361,7 +360,7 @@ When the book's language tag is not among our presets, no specific features will
             return _("Left/right minimal sizes: language defaults")
         end,
         callback = function()
-            local DoubleSpinWidget = require("/ui/widget/doublespinwidget")
+            local DoubleSpinWidget = require("ui/widget/doublespinwidget")
             local cre = require("document/credocument"):engineInit()
             local hyph_alg, alg_left_hyphen_min, alg_right_hyphen_min = cre.getSelectedHyphDict() -- luacheck: no unused
             local hyph_limits_widget = DoubleSpinWidget:new{
@@ -763,7 +762,7 @@ function ReaderTypography:onReadSettings(config)
         self.allow_doc_lang_tag_override = true
         -- Use the one manually set as fallback (with Hold)
         self.text_lang_tag = G_reader_settings:readSetting("text_lang_fallback")
-        logger.dbg("Typography lang: using fallback ", self.text_lang_tag, ", might be overriden by doc language")
+        logger.dbg("Typography lang: using fallback ", self.text_lang_tag, ", might be overridden by doc language")
     else
         self.allow_doc_lang_tag_override = true
         -- None decided, use default (shouldn't be reached)
@@ -777,8 +776,8 @@ end
 function ReaderTypography:onPreRenderDocument(config)
     -- This is called after the document has been loaded,
     -- when we know and can access the document language.
-    local props = self.ui.document:getProps()
-    local doc_language = FileManagerBookInfo.extendProps(props, self.ui.document.file).language
+    local doc_language = FileManagerBookInfo.getCustomProp("language", self.ui.document.file)
+                      or self.ui.document:getProps().language
     self.book_lang_tag = self:fixLangTag(doc_language)
 
     local is_known_lang_tag = self.book_lang_tag and LANG_TAG_TO_LANG_NAME[self.book_lang_tag] ~= nil

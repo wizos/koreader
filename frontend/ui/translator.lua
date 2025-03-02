@@ -15,10 +15,10 @@ local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
 local JSON = require("json")
 local Screen = require("device").screen
-local ffiutil  = require("ffi/util")
+local ffiUtil  = require("ffi/util")
 local logger = require("logger")
 local util = require("util")
-local T = ffiutil.template
+local T = ffiUtil.template
 local _ = require("gettext")
 
 -- From https://cloud.google.com/translate/docs/languages
@@ -225,17 +225,13 @@ end
 function Translator:genSettingsMenu()
     local function genLanguagesItems(setting_name, default_checked_item)
         local items_table = {}
-        for lang_key, lang_name in ffiutil.orderedPairs(SUPPORTED_LANGUAGES) do
+        for lang_key, lang_name in ffiUtil.orderedPairs(SUPPORTED_LANGUAGES) do
             table.insert(items_table, {
                 text_func = function()
                     return T("%1 (%2)", lang_name, lang_key)
                 end,
                 checked_func = function()
-                    if G_reader_settings:has(setting_name) then
-                        return lang_key == G_reader_settings:readSetting(setting_name)
-                    else
-                        return lang_key == default_checked_item
-                    end
+                    return lang_key == (G_reader_settings:readSetting(setting_name) or default_checked_item)
                 end,
                 callback = function()
                     G_reader_settings:saveSetting(setting_name, lang_key)
@@ -247,32 +243,6 @@ function Translator:genSettingsMenu()
     return {
         text = _("Translation settings"),
         sub_item_table = {
-            {
-                text = _("Auto-detect source language"),
-                help_text = _("This setting is best suited for foreign text found in books written in your native language."),
-                enabled_func = function()
-                    return not (G_reader_settings:isTrue("translator_from_doc_lang") and self:getDocumentLanguage() ~= nil)
-                end,
-                checked_func = function()
-                    return G_reader_settings:nilOrTrue("translator_from_auto_detect")
-                end,
-                callback = function()
-                    G_reader_settings:flipNilOrTrue("translator_from_auto_detect")
-                end,
-            },
-            {
-                text_func = function()
-                    local lang = G_reader_settings:readSetting("translator_from_language")
-                    return T(_("Translate from: %1"), self:getLanguageName(lang, ""))
-                end,
-                help_text = _("If a specific source language is manually selected, it will be used everywhere, in all your books."),
-                enabled_func = function()
-                    return not G_reader_settings:nilOrTrue("translator_from_auto_detect")
-                        and not (G_reader_settings:isTrue("translator_from_doc_lang") and self:getDocumentLanguage() ~= nil)
-                end,
-                sub_item_table = genLanguagesItems("translator_from_language"),
-                keep_menu_open = true,
-            },
             {
                 text_func = function()
                     local __, name = self:getDocumentLanguage()
@@ -292,6 +262,42 @@ This is useful:
                 callback = function()
                     G_reader_settings:flipTrue("translator_from_doc_lang")
                 end,
+            },
+            {
+                text = _("Auto-detect source language"),
+                help_text = _("This setting is best suited for foreign text found in books written in your native language."),
+                enabled_func = function()
+                    return not (G_reader_settings:isTrue("translator_from_doc_lang") and self:getDocumentLanguage() ~= nil)
+                end,
+                checked_func = function()
+                    return G_reader_settings:nilOrTrue("translator_from_auto_detect")
+                        and not (G_reader_settings:isTrue("translator_from_doc_lang") and self:getDocumentLanguage() ~= nil)
+                end,
+                callback = function()
+                    G_reader_settings:flipNilOrTrue("translator_from_auto_detect")
+                end,
+            },
+            {
+                text = _("Show romanizations"),
+                help_text = _("Displays source language text in Latin characters. This is useful for reading languages with non-Latin scripts."),
+                checked_func = function()
+                    return G_reader_settings:isTrue("translator_with_romanizations")
+                end,
+                callback = function()
+                    G_reader_settings:flipTrue("translator_with_romanizations")
+                end,
+            },
+            {
+                text_func = function()
+                    local lang = G_reader_settings:readSetting("translator_from_language")
+                    return T(_("Translate from: %1"), self:getLanguageName(lang, ""))
+                end,
+                help_text = _("If a specific source language is manually selected, it will be used everywhere, in all your books."),
+                enabled_func = function()
+                    return not G_reader_settings:nilOrTrue("translator_from_auto_detect")
+                        and not (G_reader_settings:isTrue("translator_from_doc_lang") and self:getDocumentLanguage() ~= nil)
+                end,
+                sub_item_table = genLanguagesItems("translator_from_language"),
                 separator = true,
             },
             {
@@ -300,7 +306,6 @@ This is useful:
                     return T(_("Translate to: %1"), self:getLanguageName(lang, ""))
                 end,
                 sub_item_table = genLanguagesItems("translator_to_language", self:getTargetLanguage()),
-                keep_menu_open = true,
             },
         },
     }
@@ -382,6 +387,7 @@ function Translator:loadPage(text, target_lang, source_lang)
     local query = ""
     self.trans_params.tl = target_lang
     self.trans_params.sl = source_lang
+
     for k,v in pairs(self.trans_params) do
         if type(v) == "table" then
             for _, v2 in ipairs(v) do
@@ -390,6 +396,9 @@ function Translator:loadPage(text, target_lang, source_lang)
         else
             query = query .. k .. '=' .. v .. '&'
         end
+    end
+    if G_reader_settings:isTrue("translator_with_romanizations") then
+       query = query .. "dt=rm&"
     end
     local parsed = url.parse(self:getTransServer())
     parsed.path = self.trans_path
@@ -503,14 +512,14 @@ Show translated text in TextViewer, with alternate translations
 @string source_lang[opt="auto"] (`"en"`, `"fr"`, `…`) or `"auto"` to auto-detect source language
 @string target_lang[opt] (`"en"`, `"fr"`, `…`)
 --]]
-function Translator:showTranslation(text, detailed_view, source_lang, target_lang, from_highlight, page, index)
+function Translator:showTranslation(text, detailed_view, source_lang, target_lang, from_highlight, index)
     if Device:hasClipboard() then
         Device.input.setClipboardText(text)
     end
 
     local NetworkMgr = require("ui/network/manager")
     if NetworkMgr:willRerunWhenOnline(function()
-                self:showTranslation(text, detailed_view, source_lang, target_lang, from_highlight, page, index)
+                self:showTranslation(text, detailed_view, source_lang, target_lang, from_highlight, index)
             end) then
         return
     end
@@ -519,11 +528,11 @@ function Translator:showTranslation(text, detailed_view, source_lang, target_lan
     -- translation service query.
     local Trapper = require("ui/trapper")
     Trapper:wrap(function()
-        self:_showTranslation(text, detailed_view, source_lang, target_lang, from_highlight, page, index)
+        self:_showTranslation(text, detailed_view, source_lang, target_lang, from_highlight, index)
     end)
 end
 
-function Translator:_showTranslation(text, detailed_view, source_lang, target_lang, from_highlight, page, index)
+function Translator:_showTranslation(text, detailed_view, source_lang, target_lang, from_highlight, index)
     if not target_lang then
         target_lang = self:getTargetLanguage()
     end
@@ -565,10 +574,14 @@ function Translator:_showTranslation(text, detailed_view, source_lang, target_la
         -- for easier quick reading
         local source = {}
         local translated = {}
+        local romanized = {}
         for i, r in ipairs(result[1]) do
             if detailed_view then
                 local s = type(r[2]) == "string" and r[2] or ""
                 table.insert(source, s)
+                if type(r[4]) == "string" then
+                    table.insert(romanized, r[4])
+                end
             end
             local t = type(r[1]) == "string" and r[1] or ""
             table.insert(translated, t)
@@ -577,6 +590,9 @@ function Translator:_showTranslation(text, detailed_view, source_lang, target_la
         if detailed_view then
             text_main = "● " .. text_main
             table.insert(output, "▣ " .. table.concat(source, " "))
+            if #romanized > 0 then
+                table.insert(output, table.concat(romanized, " "))
+            end
         end
         table.insert(output, text_main)
     end
@@ -632,8 +648,8 @@ function Translator:_showTranslation(text, detailed_view, source_lang, target_la
                             UIManager:close(textviewer)
                             UIManager:close(ui.highlight.highlight_dialog)
                             ui.highlight.highlight_dialog = nil
-                            if page then
-                                ui.highlight:editHighlight(page, index, false, text_main)
+                            if index then
+                                ui.highlight:editNote(index, false, text_main)
                             else
                                 ui.highlight:addNote(text_main)
                             end
@@ -645,8 +661,8 @@ function Translator:_showTranslation(text, detailed_view, source_lang, target_la
                             UIManager:close(textviewer)
                             UIManager:close(ui.highlight.highlight_dialog)
                             ui.highlight.highlight_dialog = nil
-                            if page then
-                                ui.highlight:editHighlight(page, index, false, text_all)
+                            if index then
+                                ui.highlight:editNote(index, false, text_all)
                             else
                                 ui.highlight:addNote(text_all)
                             end
@@ -686,8 +702,8 @@ function Translator:_showTranslation(text, detailed_view, source_lang, target_la
             -- Showing the translation target language in this title may make
             -- it quite long and wrapped, taking valuable vertical spacing
         text = text_all,
+        text_type = "lookup",
         height = height,
-        justified = G_reader_settings:nilOrTrue("dict_justify"),
         add_default_buttons = true,
         buttons_table = buttons_table,
         close_callback = close_callback,

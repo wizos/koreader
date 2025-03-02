@@ -54,6 +54,9 @@ function TrapWidget:init()
             SwipeDismiss = {
                 GestureRange:new{ ges = "swipe", range = full_screen, }
             },
+            PanReleaseDismiss = { -- emitted on mousewheel event
+                GestureRange:new{ ges = "pan_release", range = full_screen, }
+            },
         }
     end
     if self.text then
@@ -114,7 +117,7 @@ function TrapWidget:_dismissAndResend(evtype, ev)
         -- There may be some timing issues that could cause crashes, as we
         -- use nextTick, if the dismiss_callback uses UIManager:scheduleIn()
         -- or has set up some widget that may catch that event while not being
-        -- yet fully initialiazed.
+        -- yet fully initialized.
         -- (It happened mostly when I had some bug somewhere, and it was a quite
         -- reliable sign of a bug somewhere, but the stacktrace was unrelated
         -- to the bug location.)
@@ -136,6 +139,10 @@ function TrapWidget:onHoldDismiss(_, ev)
 end
 
 function TrapWidget:onSwipeDismiss(_, ev)
+    return self:_dismissAndResend("Gesture", ev)
+end
+
+function TrapWidget:onPanReleaseDismiss(_, ev)
     return self:_dismissAndResend("Gesture", ev)
 end
 

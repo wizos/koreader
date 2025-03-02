@@ -81,7 +81,8 @@ function RenderText:getGlyph(face, charcode, bold)
     if face.is_real_bold then
         bold = false -- don't embolden glyphs already bold
     end
-    local hash = "glyph|"..face.hash.."|"..charcode.."|"..(bold and 1 or 0)
+    -- nil is falsy, cache it as such (i.e., we don't want to use tostring here, as that would make it tristate: true/false/nil)
+    local hash = "glyph|"..face.hash.."|"..charcode.."|"..(bold and "1" or "0")
     local glyph = GlyphCache:check(hash)
     if glyph then
         -- cache hit
@@ -242,7 +243,7 @@ function RenderText:renderUtf8Text(dest_bb, x, baseline, face, text, kerning, bo
             pen_x = pen_x + (char_pads[char_idx] or 0)
             -- We used to use:
             --   pen_x = pen_x + char_pads[char_idx]
-            --   above will fail if we didnt count the same number of chars, we'll see
+            --   above will fail if we didn't count the same number of chars, we'll see
             -- We saw, and it's pretty robust: it never failed before we tried to
             -- render some binary content, which messes the utf8 sequencing: the
             -- split to UTF8 is only reversible if text is valid UTF8 (or nearly UTF8).
@@ -288,18 +289,27 @@ end
 -- @tparam ui.font.FontFaceObj face font face for the text
 -- @int glyph index
 -- @bool[opt=false] bold whether the glyph should be artificially boldened
+-- @bool[opt=false] bolder whether the glyph should be *even more* artificially boldened (*can* stack with bold, but can also be used solo)
 -- @treturn glyph
-function RenderText:getGlyphByIndex(face, glyphindex, bold)
+function RenderText:getGlyphByIndex(face, glyphindex, bold, bolder)
     if face.is_real_bold then
         bold = false -- don't embolden glyphs already bold
     end
-    local hash = "xglyph|"..face.hash.."|"..glyphindex.."|"..(bold and 1 or 0)
+    local hash = "xglyph|"..face.hash.."|"..glyphindex.."|"..(bold and "1" or "0")..(bolder and "x" or "")
     local glyph = GlyphCache:check(hash)
     if glyph then
         -- cache hit
         return glyph
     end
-    local rendered_glyph = face.ftsize:renderGlyphByIndex(glyphindex, bold and face.embolden_half_strength)
+    local embolden_strength
+    if bold or bolder then
+        embolden_strength = face.embolden_half_strength
+        if bolder then
+            -- Even if not bold, get it bolder than the strength we'd use for bold
+            embolden_strength = embolden_strength * 1.5
+        end
+    end
+    local rendered_glyph = face.ftsize:renderGlyphByIndex(glyphindex, embolden_strength)
     if not rendered_glyph then
         logger.warn("error rendering glyph (glyphindex=", glyphindex, ") for face", face)
         return

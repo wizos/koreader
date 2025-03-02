@@ -1,3 +1,5 @@
+local CacheSQLite = require("cachesqlite")
+local DataStorage = require("datastorage")
 local Version = require("version")
 local ffiutil = require("ffi/util")
 local http = require("socket.http")
@@ -7,6 +9,7 @@ local ltn12 = require("ltn12")
 local socket = require("socket")
 local socket_url = require("socket.url")
 local socketutil = require("socketutil")
+local time = require("ui/time")
 local _ = require("gettext")
 local T = ffiutil.template
 
@@ -19,7 +22,12 @@ local EpubDownloadBackend = {
    -- accessible here so that caller can know it's a user dismiss.
    dismissed_error_code = "Interrupted by user",
 }
-local max_redirects = 5; --prevent infinite redirects
+
+local FeedCache = CacheSQLite:new{
+    slots = 500,
+    db_path = DataStorage:getDataDir() .. "/cache/newsdownloader.sqlite",
+    size = 1024 * 1024 * 10, -- 10MB
+}
 
 -- filter HTML using CSS selector
 local function filter(text, element)
@@ -46,8 +54,14 @@ local function filter(text, element)
         "div#newsstorytext",
         "div.general",
         }
-    if element and element ~= "" then
-        table.insert(selectors, 1, element)
+    if type(element) == "string" and element ~= "" then
+        table.insert(selectors, 1, element)  -- Insert string at the beginning
+    elseif type(element) == "table" then
+        for _, el in ipairs(element) do
+            if type(el) == "string" and el ~= "" then
+                table.insert(selectors, 1, el)  -- Insert each non-empty element at the beginning
+            end
+        end
     end
     for _, sel in ipairs(selectors) do
        local elements = root:select(sel)
@@ -69,36 +83,107 @@ local function filter(text, element)
     return "<!DOCTYPE html><html><head></head><body>" .. filtered .. "</body></html>"
 end
 
--- Get URL content
-local function getUrlContent(url, timeout, maxtime, redirectCount)
-    logger.dbg("getUrlContent(", url, ",", timeout, ",", maxtime, ",", redirectCount, ")")
-    if not redirectCount then
-        redirectCount = 0
-    elseif redirectCount == max_redirects then
-        error("EpubDownloadBackend: reached max redirects: ", redirectCount)
+-- From https://github.com/lunarmodules/luasocket/blob/1fad1626900a128be724cba9e9c19a6b2fe2bf6b/samples/cookie.lua
+local token_class =  '[^%c%s%(%)%<%>%@%,%;%:%\\%"%/%[%]%?%=%{%}]'
+
+local function unquote(t, quoted)
+    local n = string.match(t, "%$(%d+)$")
+    if n then n = tonumber(n) end
+    if quoted[n] then return quoted[n]
+    else return t end
+end
+
+local function parse_set_cookie(c, quoted, cookie_table)
+    c = c .. ";$last=last;"
+    local _, _, n, v, i = string.find(c, "(" .. token_class ..
+                                      "+)%s*=%s*(.-)%s*;%s*()")
+    local cookie = {
+        name = n,
+        value = unquote(v, quoted),
+        attributes = {}
+    }
+    while 1 do
+        _, _, n, v, i = string.find(c, "(" .. token_class ..
+                                    "+)%s*=?%s*(.-)%s*;%s*()", i)
+        if not n or n == "$last" then break end
+        cookie.attributes[#cookie.attributes+1] = {
+            name = n,
+            value = unquote(v, quoted)
+        }
     end
+    cookie_table[#cookie_table+1] = cookie
+end
+local function split_set_cookie(s, cookie_table)
+    cookie_table = cookie_table or {}
+    -- remove quoted strings from cookie list
+    local quoted = {}
+    s = string.gsub(s, '"(.-)"', function(q)
+        quoted[#quoted+1] = q
+        return "$" .. #quoted
+    end)
+    -- add sentinel
+    s = s .. ",$last="
+    -- split into individual cookies
+    local i = 1
+    while 1 do
+        local _, _, cookie, next_token
+        _, _, cookie, i, next_token = string.find(s, "(.-)%s*%,%s*()(" ..
+            token_class .. "+)%s*=", i)
+        if not next_token then break end
+        parse_set_cookie(cookie, quoted, cookie_table)
+        if next_token == "$last" then break end
+    end
+    return cookie_table
+end
+
+local function quote(s)
+    if string.find(s, "[ %,%;]") then return '"' .. s .. '"'
+    else return s end
+end
+
+local _empty = {}
+local function build_cookies(cookies)
+    local s = ""
+    for i,v in ipairs(cookies or _empty) do
+        if v.name then
+            s = s .. v.name
+            if v.value and v.value ~= "" then
+                s = s .. '=' .. quote(v.value)
+            end
+        end
+        if i < #cookies then s = s .. "; " end
+    end
+    return s
+end
+
+-- Get URL content
+local function getUrlContent(url, cookies, timeout, maxtime, add_to_cache)
+    logger.dbg("getUrlContent(", url, ",", cookies, ", ", timeout, ",", maxtime, ",", add_to_cache, ")")
 
     if not timeout then timeout = 10 end
     logger.dbg("timeout:", timeout)
 
     local sink = {}
-    local parsed = socket_url.parse(url)
     socketutil:set_timeout(timeout, maxtime or 30)
     local request = {
         url     = url,
         method  = "GET",
         sink    = maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink),
+        headers = {
+            ["cookie"] = build_cookies(cookies)
+        }
     }
     logger.dbg("request:", request)
     local code, headers, status = socket.skip(1, http.request(request))
+
     socketutil:reset_timeout()
-    logger.dbg("After http.request")
     local content = table.concat(sink) -- empty or content accumulated till now
-    logger.dbg("type(code):", type(code))
-    logger.dbg("code:", code)
-    logger.dbg("headers:", headers)
-    logger.dbg("status:", status)
-    logger.dbg("#content:", #content)
+    logger.dbg(
+        "getUrlContent: after http.request",
+        "type(code):", type(code), "code:", code, "headers:", headers,
+        "status:", status,
+        "#content:", #content
+    )
 
     if code == socketutil.TIMEOUT_CODE or
        code == socketutil.SSL_HANDSHAKE_CODE or
@@ -107,26 +192,13 @@ local function getUrlContent(url, timeout, maxtime, redirectCount)
         logger.warn("request interrupted:", status or code)
         return false, code
     end
+    if code >= 400 and code < 500 then
+        logger.warn("HTTP error:", status or code)
+        return false, status or code
+    end
     if headers == nil then
         logger.warn("No HTTP headers:", status or code or "network unreachable")
         return false, "Network or remote server unavailable"
-    end
-    if not code or code < 200 or code > 299 then -- all 200..299 HTTP codes are OK
-        if code and code > 299 and code < 400  and headers and headers.location then -- handle 301, 302...
-           local redirected_url = headers.location
-           local parsed_redirect_location = socket_url.parse(redirected_url)
-           if not parsed_redirect_location.host then
-             parsed_redirect_location.host = parsed.host
-             parsed_redirect_location.scheme = parsed.scheme
-             redirected_url = socket_url.build(parsed_redirect_location)
-           end
-           logger.dbg("getUrlContent: Redirecting to url: ", redirected_url)
-           return getUrlContent(redirected_url, timeout, maxtime, redirectCount + 1)
-        else
-           error("EpubDownloadBackend: Don't know how to handle HTTP response status:", status or code)
-        end
-        logger.warn("HTTP status not okay:", status or code)
-        return false, "Remote server error or unavailable"
     end
     if headers and headers["content-length"] then
         -- Check we really got the announced content size
@@ -135,13 +207,60 @@ local function getUrlContent(url, timeout, maxtime, redirectCount)
             return false, "Incomplete content received"
         end
     end
+
+    if add_to_cache then
+        logger.dbg("Adding to cache", url)
+        FeedCache:insert(url, {
+            headers = headers,
+            content = content,
+        })
+    end
+
     logger.dbg("Returning content ok")
     return true, content
 end
 
-function EpubDownloadBackend:getResponseAsString(url)
+function EpubDownloadBackend:getCache()
+    return FeedCache
+end
+
+function EpubDownloadBackend:getConnectionCookies(url, credentials)
+
+    local body = ""
+    for k, v in pairs(credentials) do
+        body = body .. (tostring(k) .. "=" .. tostring(v) .. "&")
+    end
+    local request = {
+        method  = "POST",
+        url     = url,
+        headers = {
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["content-length"] = tostring(#body)
+            },
+        source = ltn12.source.string(body),
+        sink    = nil
+    }
+    logger.dbg("request:", request, ", body: ", body)
+    local code, headers, status = socket.skip(1, http.request(request))
+
+    logger.dbg(
+        "getConnectionCookies: after http.request",
+        "code:", code,
+        "headers:", headers,
+        "status:", status
+    )
+
+    local cookies = {}
+    local to_parse = headers["set-cookie"]
+    split_set_cookie(to_parse, cookies)
+    logger.dbg("getConnectionCookies: cookies:", cookies)
+
+    return cookies
+end
+
+function EpubDownloadBackend:getResponseAsString(url, cookies, add_to_cache)
     logger.dbg("EpubDownloadBackend:getResponseAsString(", url, ")")
-    local success, content = getUrlContent(url)
+    local success, content = getUrlContent(url, cookies, nil, nil, add_to_cache)
     if (success) then
         return content
     else
@@ -157,23 +276,23 @@ function EpubDownloadBackend:resetTrapWidget()
     self.trap_widget = nil
 end
 
-function EpubDownloadBackend:loadPage(url)
+function EpubDownloadBackend:loadPage(url, cookies)
     local completed, success, content
     if self.trap_widget then -- if previously set with EpubDownloadBackend:setTrapWidget()
         local Trapper = require("ui/trapper")
         local timeout, maxtime = 30, 60
         -- We use dismissableRunInSubprocess with complex return values:
         completed, success, content = Trapper:dismissableRunInSubprocess(function()
-            return getUrlContent(url, timeout, maxtime)
+            return getUrlContent(url, cookies, timeout, maxtime)
         end, self.trap_widget)
         if not completed then
             error(self.dismissed_error_code) -- "Interrupted by user"
         end
     else
         local timeout, maxtime = 10, 60
-        success, content = getUrlContent(url, timeout, maxtime)
+        success, content = getUrlContent(url, cookies, timeout, maxtime)
     end
-    logger.dbg("success:", success, "type(content):", type(content), "content:", content:sub(1, 500), "...")
+    logger.dbg("success:", success, "type(content):", type(content), "content:", type(content) == "string" and content:sub(1, 500), "...")
     if not success then
         error(content)
     else
@@ -207,8 +326,13 @@ function EpubDownloadBackend:createEpub(epub_path, html, url, include_images, me
     local base_url = socket_url.parse(url)
 
     local cancelled = false
-    local page_htmltitle = html:match([[<title>(.*)</title>]])
+    local page_htmltitle = html:match([[<title[^>]*>(.-)</title>]])
     logger.dbg("page_htmltitle is ", page_htmltitle)
+
+    -- Rejigger HTML into XHTML to avoid unclosed elements. See <https://github.com/koreader/crengine/pull/370#issuecomment-910156921>.
+    local cre = require("libs/libkoreader-cre")
+    html = cre.getBalancedHTML(html, 0x0)
+
 --    local sections = html.sections -- Wikipedia provided TOC
     local bookid = "bookid_placeholder" --string.format("wikipedia_%s_%s_%s", lang, phtml.pageid, phtml.revid)
     -- Not sure if this bookid may ever be used by indexing software/calibre, but if it is,
@@ -225,6 +349,10 @@ function EpubDownloadBackend:createEpub(epub_path, html, url, include_images, me
             logger.dbg("no src found in ", img_tag)
             return nil
         end
+        if src:sub(1,5) == "data:" then
+            logger.dbg("skipping data URI", src)
+            return nil
+        end
         if src:sub(1,2) == "//" then
             src = "https:" .. src -- Wikipedia redirects from http to https, so use https
         elseif src:sub(1,1) == "/" then -- non absolute url
@@ -239,14 +367,13 @@ function EpubDownloadBackend:createEpub(epub_path, html, url, include_images, me
                 src_ext = src_ext:match("(.-)%?") -- remove ?blah
             end
             local ext = src_ext:match(".*%.(%S%S%S?%S?%S?)$") -- extensions are only 2 to 5 chars
-            if ext == nil or ext == "" then
-                -- we won't know what mimetype to use, ignore it
-                logger.dbg("no file extension found in ", src)
-                return nil
+            if ext == nil then
+                --- @todo Reverse the logic to download the image first so we can get the mimetype from the headers?
+                ext = ""
             end
             ext = ext:lower()
             local imgid = string.format("img%05d", imagenum)
-            local imgpath = string.format("images/%s.%s", imgid, ext)
+            local imgpath = ext ~= "" and string.format("images/%s.%s", imgid, ext) or string.format("images/%s", imgid)
             local mimetype = ext_to_mimetype[ext] or ""
             local width = tonumber(img_tag:match([[width="([^"]*)"]]))
             local height = tonumber(img_tag:match([[height="([^"]*)"]]))
@@ -327,7 +454,7 @@ function EpubDownloadBackend:createEpub(epub_path, html, url, include_images, me
 
     -- ----------------------------------------------------------------
     -- /mimetype : always "application/epub+zip"
-    epub:add("mimetype", "application/epub+zip")
+    epub:add("mimetype", "application/epub+zip", true)
 
     -- ----------------------------------------------------------------
     -- /META-INF/container.xml : always the same content
@@ -457,15 +584,22 @@ function EpubDownloadBackend:createEpub(epub_path, html, url, include_images, me
     -- OEBPS/images/*
     if include_images then
         local nb_images = #images
+        local before_images_time = time.now()
+        local time_prev = before_images_time
         for inum, img in ipairs(images) do
-            -- Process can be interrupted at this point between each image download
+            -- Process can be interrupted every second between image downloads
             -- by tapping while the InfoMessage is displayed
             -- We use the fast_refresh option from image #2 for a quicker download
-            local go_on = UI:info(T(_("%1\n\nRetrieving image %2 / %3 …"), message, inum, nb_images), inum >= 2)
-            if not go_on then
-                logger.dbg("cancelled")
-                cancelled = true
-                break
+            local go_on
+            if time.to_ms(time.since(time_prev)) > 1000 then
+                time_prev = time.now()
+                go_on = UI:info((message and message ~= "" and message .. "\n\n" or "") .. T(_("Retrieving image %1 / %2 …"), inum, nb_images), inum >= 2)
+                if not go_on then
+                    cancelled = true
+                    break
+                end
+            else
+                UI:info((message and message ~= "" and message .. "\n\n" or "") .. T(_("Retrieving image %1 / %2 …"), inum, nb_images), inum >= 2, true)
             end
             local src = img.src
             if use_img_2x and img.src2x then
@@ -477,7 +611,7 @@ function EpubDownloadBackend:createEpub(epub_path, html, url, include_images, me
             if success then
                 logger.dbg("success, size:", #content)
             else
-                logger.dbg("failed fetching:", src)
+                logger.info("failed fetching:", src)
             end
             if success then
                 -- Images do not need to be compressed, so spare some cpu cycles
@@ -486,7 +620,6 @@ function EpubDownloadBackend:createEpub(epub_path, html, url, include_images, me
                     no_compression = false
                 end
                 epub:add("OEBPS/"..img.imgpath, content, no_compression)
-                logger.dbg("Adding OEBPS/"..img.imgpath)
             else
                 go_on = UI:confirm(T(_("Downloading image %1 failed. Continue anyway?"), inum), _("Stop"), _("Continue"))
                 if not go_on then
@@ -495,6 +628,7 @@ function EpubDownloadBackend:createEpub(epub_path, html, url, include_images, me
                 end
             end
         end
+        logger.dbg("Image download time for:", page_htmltitle, time.to_ms(time.since(before_images_time)), "ms")
     end
 
     -- Done with adding files
