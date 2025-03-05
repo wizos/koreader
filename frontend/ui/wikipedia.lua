@@ -4,6 +4,7 @@ local Screen = require("device").screen
 local ffiutil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
+local time = require("ui/time")
 local util = require("util")
 local _ = require("gettext")
 local T = ffiutil.template
@@ -54,7 +55,7 @@ local Wikipedia = {
    wiki_phtml_params = {
        action = "parse",
        format = "json",
-       -- we only need the following informations
+       -- we only need the following pieces of information
        prop = "text|sections|displaytitle|revid",
        -- page = nil, -- text to lookup, will be added below
        -- disabletoc = "", -- if we want to remove toc IN html
@@ -67,7 +68,7 @@ local Wikipedia = {
    wiki_images_params = { -- same as previous one, with just text html
        action = "parse",
        format = "json",
-       -- we only need the following informations
+       -- we only need the following pieces of information
        prop = "text",
        -- page = nil, -- text to lookup, will be added below
        redirects = "",
@@ -346,7 +347,7 @@ function Wikipedia:getFullPageImages(wiki_title, lang)
                     end
                     local width = tonumber(timg:match([[width="([^"]*)"]]))
                     local height = tonumber(timg:match([[height="([^"]*)"]]))
-                    -- Ignore img without width and height, which should exlude
+                    -- Ignore img without width and height, which should exclude
                     -- javascript maps and other unsupported stuff
                     if width and height then
                         -- Images in the html we got seem to be x4.5 the size of
@@ -582,7 +583,7 @@ end
 
 
 -- UTF8 of unicode geometrical shapes we'll prepend to wikipedia section headers,
--- to help identifying hierarchy (othewise, the small font size differences helps).
+-- to help identifying hierarchy (otherwise, the small font size differences helps).
 -- Best if identical to the ones used above for prettifying full plain text page.
 -- These chosen ones are available in most fonts (prettier symbols
 -- exist in unicode, but are available in a few fonts only) and
@@ -698,6 +699,10 @@ function Wikipedia:createEpub(epub_path, page, lang, with_images)
             logger.info("no src found in ", img_tag)
             return nil
         end
+        if src:sub(1,5) == "data:" then
+            logger.dbg("skipping data URI", src)
+            return nil
+        end
         if src:sub(1,2) == "//" then
             src = "https:" .. src -- Wikipedia redirects from http to https, so use https
         elseif src:sub(1,1) == "/" then -- non absolute url
@@ -800,14 +805,18 @@ function Wikipedia:createEpub(epub_path, page, lang, with_images)
     logger.dbg("Images found in html:", images)
 
     -- See what to do with images
-    local include_images = false
-    local use_img_2x = false
+    local include_images = G_reader_settings:readSetting("wikipedia_epub_include_images")
+    local use_img_2x = G_reader_settings:readSetting("wikipedia_epub_highres_images")
     if with_images then
         -- If no UI (Trapper:wrap() not called), UI:confirm() will answer true
         if #images > 0 then
-            include_images = UI:confirm(T(_("This article contains %1 images.\nWould you like to download and include them in the generated EPUB file?"), #images), _("Don't include"), _("Include"))
+            if include_images == nil then
+                include_images = UI:confirm(T(_("This article contains %1 images.\nWould you like to download and include them in the generated EPUB file?"), #images), _("Don't include"), _("Include"))
+            end
             if include_images then
-                use_img_2x = UI:confirm(_("Would you like to use slightly higher quality images? This will result in a bigger file size."), _("Standard quality"), _("Higher quality"))
+                if use_img_2x == nil then
+                    use_img_2x = UI:confirm(_("Would you like to use slightly higher quality images? This will result in a bigger file size."), _("Standard quality"), _("Higher quality"))
+                end
             end
         else
             UI:info(_("This article does not contain any images."))
@@ -838,7 +847,7 @@ function Wikipedia:createEpub(epub_path, page, lang, with_images)
 
     -- ----------------------------------------------------------------
     -- /mimetype : always "application/epub+zip"
-    epub:add("mimetype", "application/epub+zip")
+    epub:add("mimetype", "application/epub+zip", true)
 
     -- ----------------------------------------------------------------
     -- /META-INF/container.xml : always the same content
@@ -915,6 +924,84 @@ function Wikipedia:createEpub(epub_path, page, lang, with_images)
     -- to look more alike wikipedia web pages (that the user can ignore
     -- with "Embedded Style" off)
     epub:add("OEBPS/stylesheet.css", [[
+/* Generic styling picked from our epub.css (see it for comments),
+   to give this epub a book look even if used with html5.css */
+body {
+  text-align: justify;
+}
+h1, h2, h3, h4, h5, h6 {
+  margin-top: 0.7em;
+  margin-bottom: 0.5em;
+  hyphens: none;
+}
+h1 { font-size: 150%; }
+h2 { font-size: 140%; }
+h3 { font-size: 130%; }
+h4 { font-size: 120%; }
+h5 { font-size: 110%; }
+h6 { font-size: 100%; }
+p {
+  text-indent: 1.2em;
+  margin-top: 0;
+  margin-bottom: 0;
+}
+blockquote {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  margin-left: 2em;
+  margin-right: 1em;
+}
+blockquote:dir(rtl) {
+  margin-left: 1em;
+  margin-right: 2em;
+}
+dl {
+  margin-left: 0;
+}
+dt {
+  margin-left: 0;
+  margin-top: 0.3em;
+  font-weight: bold;
+}
+dd {
+  margin-left: 1.3em;
+}
+dd:dir(rtl) {
+  margin-left: unset;
+  margin-right: 1.3em;
+}
+pre {
+  text-align: left;
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+hr {
+  border-style: solid;
+}
+table {
+  font-size: 80%;
+  margin: 3px 0;
+  border-spacing: 1px;
+}
+table table { /* stop imbricated tables from getting smaller */
+  font-size: 100%;
+}
+th, td {
+  padding: 3px;
+}
+th {
+  background-color: #DDD;
+  text-align: center;
+}
+table caption {
+  padding: 4px;
+  background-color: #EEE;
+}
+sup { font-size: 70%; }
+sub { font-size: 70%; }
+
+/* Specific for our Wikipedia EPUBs */
+
 /* Make section headers looks left aligned and avoid some page breaks */
 h1, h2 {
     page-break-before: always;
@@ -978,10 +1065,7 @@ a.newwikinonexistent {
 
 /* Don't waste left margin for TOC, notes and other lists */
 ul, ol {
-    margin-left: 0;
-}
-ul:dir(rtl), ol:dir(rtl) {
-    margin-right: 0;
+    margin: 0;
 }
 /* OL in Wikipedia pages may inherit their style-type from a wrapping div,
  * ensure they fallback to decimal with inheritance */
@@ -1176,6 +1260,11 @@ table {
 .citation {
     font-style: italic;
 }
+abbr.abbr {
+    /* Prevent these from looking like a link */
+    text-decoration: inherit;
+}
+
 /* hide some view/edit/discuss short links displayed as "v m d" */
 .nv-view, .nv-edit, .nv-talk {
     display: none;
@@ -1333,7 +1422,7 @@ table {
     -- crengine does not support the <math> family of tags for displaying formulas,
     -- which results in lots of space taken by individual character in the formula,
     -- each on a single line...
-    -- Also, usally, these <math> tags are followed by a <img> tag pointing to a
+    -- Also, usually, these <math> tags are followed by a <img> tag pointing to a
     -- SVG version of the formula, that we took care earlier to change the url to
     -- point to a PNG version of the formula (which is still not perfect, as it does
     -- not adjust to the current html font size, but it is at least readable).
@@ -1358,7 +1447,7 @@ table {
     end
     html = html:gsub([[href="/wiki/([^"]*)"]], cleanWikiPageTitle)
 
-    -- Remove href from links to non existant wiki page so they are not clickable :
+    -- Remove href from links to nonexistent wiki page so they are not clickable :
     -- <a href="/w/index.php?title=PageTitle&amp;action=edit&amp;redlink=1" class="new"
     --          title="PageTitle">PageTitle____on</a>
     -- (removal of the href="" will make them non clickable)
@@ -1369,12 +1458,12 @@ table {
 
     if self.wiki_prettify then
         -- Prepend some symbols to section titles for a better visual feeling of hierarchy
-        html = html:gsub("<h1>", "<h1> "..h1_sym.." ")
-        html = html:gsub("<h2>", "<h2> "..h2_sym.." ")
-        html = html:gsub("<h3>", "<h3> "..h3_sym.." ")
-        html = html:gsub("<h4>", "<h4> "..h4_sym.." ")
-        html = html:gsub("<h5>", "<h5> "..h5_sym.." ")
-        html = html:gsub("<h6>", "<h6> "..h6_sym.." ")
+        html = html:gsub("(<h1[^>]*>)", "%1 "..h1_sym.." ")
+        html = html:gsub("(<h2[^>]*>)", "%1 "..h2_sym.." ")
+        html = html:gsub("(<h3[^>]*>)", "%1 "..h3_sym.." ")
+        html = html:gsub("(<h4[^>]*>)", "%1 "..h4_sym.." ")
+        html = html:gsub("(<h5[^>]*>)", "%1 "..h5_sym.." ")
+        html = html:gsub("(<h6[^>]*>)", "%1 "..h6_sym.." ")
     end
 
     -- Note: in all the gsub patterns above, we used lowercase for tags and attributes
@@ -1415,14 +1504,22 @@ table {
     -- OEBPS/images/*
     if include_images then
         local nb_images = #images
+        local before_images_time = time.now()
+        local time_prev = before_images_time
         for inum, img in ipairs(images) do
-            -- Process can be interrupted at this point between each image download
+            -- Process can be interrupted every second between image downloads
             -- by tapping while the InfoMessage is displayed
             -- We use the fast_refresh option from image #2 for a quicker download
-            local go_on = UI:info(T(_("Retrieving image %1 / %2 …"), inum, nb_images), inum >= 2)
-            if not go_on then
-                cancelled = true
-                break
+            local go_on
+            if time.to_ms(time.since(time_prev)) > 1000 then
+                time_prev = time.now()
+                go_on = UI:info(T(_("Retrieving image %1 / %2 …"), inum, nb_images), inum >= 2)
+                if not go_on then
+                    cancelled = true
+                    break
+                end
+            else
+                UI:info(T(_("Retrieving image %1 / %2 …"), inum, nb_images), inum >= 2, true)
             end
             local src = img.src
             if use_img_2x and img.src2x then
@@ -1451,6 +1548,7 @@ table {
                 end
             end
         end
+        logger.dbg("Image download time for:", page_htmltitle, time.to_ms(time.since(before_images_time)), "ms")
     end
 
     -- Done with adding files

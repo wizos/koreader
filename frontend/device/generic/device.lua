@@ -41,11 +41,15 @@ local Device = {
     hasAuxBattery = no,
     hasKeyboard = no,
     hasKeys = no,
+    hasScreenKB = no, -- in practice only some Kindles
+    hasSymKey = no, -- in practice only some Kindles
     canKeyRepeat = no,
     hasDPad = no,
+    useDPadAsActionKeys = no,
     hasExitOptions = yes,
     hasFewKeys = no,
     hasWifiToggle = yes,
+    hasSeamlessWifiToggle = yes, -- Can toggle Wi-Fi without focus loss and extra user interaction (i.e., not Android)
     hasWifiManager = no,
     hasWifiRestore = no,
     isDefaultFullscreen = yes,
@@ -61,6 +65,7 @@ local Device = {
     hasExternalSD = no, -- or other storage volume that cannot be accessed using the File Manager
     canHWDither = no,
     canHWInvert = no,
+    hasKaleidoWfm = no,
     canDoSwipeAnimation = no,
     canModifyFBInfo = no, -- some NTX boards do wonky things with the rotate flag after a FBIOPUT_VSCREENINFO ioctl
     canUseCBB = yes, -- The C BB maintains a 1:1 feature parity with the Lua BB, except that is has NO support for BB4, and limited support for BBRGB24
@@ -91,7 +96,7 @@ local Device = {
     stopTextInput = function() end,
 
     -- use these only as a last resort. We should abstract the functionality
-    -- and have device dependent implementations in the corresponting
+    -- and have device dependent implementations in the corresponding
     -- device/<devicetype>/device.lua file
     -- (these are functions!)
     isAndroid = no,
@@ -165,6 +170,30 @@ function Device:invertButtons()
     end
 end
 
+function Device:invertButtonsLeft()
+    if self:hasKeys() and self.input and self.input.event_map then
+        for key, value in pairs(self.input.event_map) do
+            if value == "LPgFwd" then
+                self.input.event_map[key] = "LPgBack"
+            elseif value == "LPgBack" then
+                self.input.event_map[key] = "LPgFwd"
+            end
+        end
+    end
+end
+
+function Device:invertButtonsRight()
+    if self:hasKeys() and self.input and self.input.event_map then
+        for key, value in pairs(self.input.event_map) do
+            if value == "RPgFwd" then
+                self.input.event_map[key] = "RPgBack"
+            elseif value == "RPgBack" then
+                self.input.event_map[key] = "RPgFwd"
+            end
+        end
+    end
+end
+
 function Device:init()
     if not self.screen then
         error("screen/framebuffer must be implemented")
@@ -228,6 +257,12 @@ function Device:init()
         if G_reader_settings:isTrue("input_invert_page_turn_keys") then
             self:invertButtons()
         end
+        if G_reader_settings:isTrue("input_invert_left_page_turn_keys") then
+            self:invertButtonsLeft()
+        end
+        if G_reader_settings:isTrue("input_invert_right_page_turn_keys") then
+            self:invertButtonsRight()
+        end
     end
 
     if self:hasGSensor() then
@@ -284,6 +319,11 @@ function Device:init()
             self.screen:toggleSWDithering(true)
         end
     end
+
+    -- Can't be seamless if you can't do it at all ;)
+    if not self:hasWifiToggle() then
+        self.hasSeamlessWifiToggle = no
+    end
 end
 
 function Device:setScreenDPI(dpi_override)
@@ -320,7 +360,7 @@ function Device:onPowerEvent(ev)
                 self:resume()
                 local widget_was_closed = Screensaver:close()
                 if widget_was_closed and self:needsScreenRefreshAfterResume() then
-                    UIManager:scheduleIn(1, function() self.screen:refreshFull() end)
+                    UIManager:scheduleIn(1, function() self.screen:refreshFull(0, 0, self.screen:getWidth(), self.screen:getHeight()) end)
                 end
                 self.powerd:afterResume()
             end
@@ -365,7 +405,7 @@ function Device:onPowerEvent(ev)
         --       and on platforms where we defer to a system tool, it'd probably suspend too early!
         --       c.f., #6676
         if self:needsScreenRefreshAfterResume() then
-            self.screen:refreshFull()
+            self.screen:refreshFull(0, 0, self.screen:getWidth(), self.screen:getHeight())
         end
         -- NOTE: In the same vein as above, make sure we update the screen *now*, before dealing with Wi-Fi.
         UIManager:forceRePaint()
@@ -409,6 +449,17 @@ function Device:install()
             end
             UIManager:broadcastEvent(Event:new("Exit", save_quit))
         end,
+        cancel_text = _("Later"),
+        cancel_callback = function()
+            local InfoMessage = require("ui/widget/infomessage")
+            UIManager:show(InfoMessage:new{
+                text = _("The update will be applied the next time KOReader is started."),
+                unmovable = true,
+                dismissable = false,
+            })
+        end,
+        unmovable = true,
+        dismissable = false,
     })
 end
 
@@ -466,6 +517,12 @@ function Device:simulateResume() end
 
 -- Put device into standby, input devices (buttons, touchscreen ...) stay enabled
 function Device:standby(max_duration) end
+
+
+-- Returns a string, used to determine the platform to fetch OTA updates
+function Device:otaModel()
+    return self.ota_model, "ota"
+end
 
 --[[--
 Device specific method for performing haptic feedback.
@@ -553,7 +610,7 @@ function Device:exit()
     G_reader_settings:close()
 
     -- I/O teardown
-    require("ffi/input"):closeAll()
+    self.input:teardown()
 end
 
 -- Lifted from busybox's libbb/inet_cksum.c
@@ -1019,7 +1076,6 @@ function Device:_setEventHandlers(uimgr)
                 text = message_text or _("Are you sure you want to reboot the device?"),
                 ok_text = _("Reboot"),
                 ok_callback = function()
-                    UIManager:broadcastEvent(Event:new("Reboot"))
                     UIManager:nextTick(UIManager.reboot_action)
                 end,
             })
@@ -1035,7 +1091,6 @@ function Device:_setEventHandlers(uimgr)
                 text = message_text or _("Are you sure you want to power off the device?"),
                 ok_text = _("Power off"),
                 ok_callback = function()
-                    UIManager:broadcastEvent(Event:new("PowerOff"))
                     UIManager:nextTick(UIManager.poweroff_action)
                 end,
             })
@@ -1097,8 +1152,10 @@ end
 -- The common operations that should be performed after resuming the device.
 function Device:_afterResume(inhibit)
     if inhibit ~= false then
-        -- Restore key repeat
-        self:restoreKeyRepeat()
+        -- Restore key repeat if it's not disabled
+        if G_reader_settings:nilOrFalse("input_no_key_repeat") then
+            self:restoreKeyRepeat()
+        end
 
         -- Restore full input handling
         self.input:inhibitInput(false)

@@ -1,42 +1,3 @@
--- Check if we're running a busted version recent enough that we don't need to deal with the LuaJIT hacks...
--- That currently means > 2.0.0 (i.e., scm-2, which isn't on LuaRocks...).
-local busted_ok = false
-for name, _ in pairs(package.loaded) do
-    if name == "busted.luajit" then
-        busted_ok = true
-        break
-    end
-end
-
--- Don't try to overwrite metatables so we can use --auto-insulate-tests
--- Shamelessly copied from https://github.com/Olivine-Labs/busted/commit/2dfff99bda01fd3da56fd23415aba5a2a4cc0ffd
-if not busted_ok then
-    local ffi = require "ffi"
-
-    local original_metatype = ffi.metatype
-    local original_store = {}
-    ffi.metatype = function (primary, ...)
-        if original_store[primary] then
-            return original_store[primary]
-        end
-        local success, result, err = pcall(original_metatype, primary, ...)
-        if not success then
-            -- hard error was thrown
-            error(result, 2)
-        end
-        if not result then
-            -- soft error was returned
-            return result, err
-        end
-        -- it worked, store and return
-        original_store[primary] = result
-        return result
-    end
-end
-
-package.path = "?.lua;common/?.lua;rocks/share/lua/5.1/?.lua;frontend/?.lua;" .. package.path
-package.cpath = "?.so;common/?.so;/usr/lib/lua/?.so;rocks/lib/lua/5.1/?.so;" .. package.cpath
-
 -- turn off debug by default and set log level to warning
 require("dbg"):turnOff()
 local logger = require("logger")
@@ -51,8 +12,10 @@ os.remove(DataStorage:getDataDir() .. "/defaults.tests.lua.old")
 G_defaults = require("luadefaults"):open(DataStorage:getDataDir() .. "/defaults.tests.lua")
 
 -- global reader settings
-os.remove(DataStorage:getDataDir().."/settings.reader.lua")
-G_reader_settings = require("luasettings"):open(".reader")
+os.remove(DataStorage:getDataDir() .. "/settings.tests.lua")
+os.remove(DataStorage:getDataDir() .. "/settings.tests.lua.old")
+G_reader_settings = require("luasettings"):open(DataStorage:getDataDir() .. "/settings.tests.lua")
+G_reader_settings:saveSetting("document_metadata_folder", "dir")
 
 -- global einkfb for Screen (do not show SDL window)
 einkfb = require("ffi/framebuffer") --luacheck: ignore
@@ -91,52 +54,35 @@ package.reload = function(name)
     return require(name)
 end
 
-package.unloadAll = function()
-    local candidates = {
-        "spec/",
-        "frontend/",
-        "plugins/",
-        "datastorage.lua",
-        "defaults.lua",
-    }
-    local pending = {}
-    for name, _ in pairs(package.loaded) do
-        local path = package.searchpath(name, package.path)
-        if path ~= nil then
-            for _, candidate in ipairs(candidates) do
-                if path:find(candidate) == 1 then
-                    table.insert(pending, name)
-                end
-            end
+function disable_plugins()
+    local PluginLoader = require("pluginloader")
+    PluginLoader.enabled_plugins = {}
+    PluginLoader.disabled_plugins = {}
+    PluginLoader.loaded_plugins = {}
+end
+
+function load_plugin(name)
+    local PluginLoader = require("pluginloader")
+    local t = PluginLoader:_discover()
+    for _, v in ipairs(t) do
+        if v.name == name then
+            PluginLoader:_load{v}
+            return
         end
     end
-    for _, name in ipairs(pending) do
-        if name ~= "commonrequire" then
-            assert(package.unload(name))
-        end
-    end
-    return #pending
+    assert(false)
 end
 
-local background_runner
-requireBackgroundRunner = function()
-    require("pluginshare").stopBackgroundRunner = nil
-    if background_runner == nil then
-        local package_path = package.path
-        package.path = "plugins/backgroundrunner.koplugin/?.lua;" .. package.path
-        background_runner = dofile("plugins/backgroundrunner.koplugin/main.lua")
-        package.path = package_path
-    end
-    return background_runner
+function fastforward_ui_events()
+    local UIManager = require("ui/uimanager")
+    -- Fast forward all scheduled tasks.
+    UIManager:shiftScheduledTasksBy(-1e9)
+    -- Fix hang when running tests with our docker base image SDL.
+    UIManager:setInputTimeout(0)
+    -- And run the UI manager's input loop once.
+    UIManager:handleInput()
 end
 
-stopBackgroundRunner = function()
-    background_runner = nil
-    require("pluginshare").stopBackgroundRunner = true
-end
-
-notifyBackgroundJobsUpdated = function()
-    if background_runner then
-        background_runner:onBackgroundJobsUpdated()
-    end
+function screenshot(screen, filename)
+    screen:shot(DataStorage:getDataDir() .. "/screenshots/" .. filename)
 end

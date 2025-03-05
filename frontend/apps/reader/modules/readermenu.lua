@@ -4,6 +4,7 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local Event = require("ui/event")
 local InputContainer = require("ui/widget/container/inputcontainer")
+local PluginLoader = require("pluginloader")
 local Screensaver = require("ui/screensaver")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
@@ -45,8 +46,9 @@ function ReaderMenu:init()
             remember = false,
             callback = function()
                 self:onTapCloseMenu()
+                local file = self.ui.document.file
                 self.ui:onClose()
-                self.ui:showFileManager()
+                self.ui:showFileManager(file)
             end,
         },
         main = {
@@ -95,7 +97,7 @@ function ReaderMenu:getPreviousFile()
     return require("readhistory"):getPreviousFile(self.ui.document.file)
 end
 
-function ReaderMenu:onReaderReady()
+function ReaderMenu:initGesListener()
     if not Device:isTouchDevice() then return end
 
     local DTAP_ZONE_MENU = G_defaults:readSetting("DTAP_ZONE_MENU")
@@ -179,6 +181,8 @@ function ReaderMenu:onReaderReady()
     })
 end
 
+ReaderMenu.onReaderReady = ReaderMenu.initGesListener
+
 function ReaderMenu:setUpdateItemTable()
     for _, widget in pairs(self.registered_widgets) do
         local ok, err = pcall(widget.addToMainMenu, widget, self.menu_items)
@@ -228,7 +232,7 @@ function ReaderMenu:setUpdateItemTable()
         },
     }
 
-    self.menu_items.page_overlap = require("ui/elements/page_overlap")
+    self.menu_items.page_overlap = dofile("frontend/ui/elements/page_overlap.lua")
 
     -- settings tab
     -- insert common settings
@@ -238,11 +242,11 @@ function ReaderMenu:setUpdateItemTable()
 
     if Device:isTouchDevice() then
         -- Settings > Taps & Gestures; mostly concerns touch related page turn stuff, and only applies to Reader
-        self.menu_items.page_turns = require("ui/elements/page_turns")
+        self.menu_items.page_turns = dofile("frontend/ui/elements/page_turns.lua")
     end
     -- Settings > Navigation; while also related to page turns, this mostly concerns physical keys, and applies *everywhere*
     if Device:hasKeys() then
-        self.menu_items.physical_buttons_setup = require("ui/elements/physical_buttons")
+        self.menu_items.physical_buttons_setup = dofile("frontend/ui/elements/physical_buttons.lua")
     end
     -- insert DjVu render mode submenu just before the last entry (show advanced)
     -- this is a bit of a hack
@@ -252,7 +256,7 @@ function ReaderMenu:setUpdateItemTable()
 
     if Device:supportsScreensaver() then
         local ss_book_settings = {
-            text = _("Exclude this book's content and cover from screensaver"),
+            text = _("Do not show this book cover on sleep screen"),
             enabled_func = function()
                 if self.ui and self.ui.document then
                     local screensaverType = G_reader_settings:readSetting("screensaver_type")
@@ -272,27 +276,22 @@ function ReaderMenu:setUpdateItemTable()
                 end
                 self.ui:saveSettings()
             end,
-            added_by_readermenu_flag = true,
         }
-        local screensaver_sub_item_table = require("ui/elements/screensaver_menu")
-        -- Before inserting this new item, remove any previously added one
-        for i = #screensaver_sub_item_table, 1, -1 do
-            if screensaver_sub_item_table[i].added_by_readermenu_flag then
-                table.remove(screensaver_sub_item_table, i)
-            end
-        end
+        local screensaver_sub_item_table = dofile("frontend/ui/elements/screensaver_menu.lua")
         table.insert(screensaver_sub_item_table, ss_book_settings)
         self.menu_items.screensaver = {
-            text = _("Screensaver"),
+            text = _("Sleep screen"),
             sub_item_table = screensaver_sub_item_table,
         }
     end
 
-    local PluginLoader = require("pluginloader")
+    -- tools tab
     self.menu_items.plugin_management = {
         text = _("Plugin management"),
-        sub_item_table = PluginLoader:genPluginManagerSubItem()
+        sub_item_table = PluginLoader:genPluginManagerSubItem(),
     }
+    self.menu_items.patch_management = dofile("frontend/ui/elements/patch_management.lua")
+
     -- main menu tab
     -- insert common info
     for id, common_setting in pairs(dofile("frontend/ui/elements/common_info_menu_table.lua")) do
@@ -330,6 +329,7 @@ function ReaderMenu:setUpdateItemTable()
         end
     }
 
+    -- NOTE: This is cached via require for ui/plugin/insert_menu's sake...
     local order = require("ui/elements/reader_menu_order")
 
     local MenuSorter = require("ui/menusorter")
@@ -360,8 +360,6 @@ function ReaderMenu:saveDocumentSettingsAsDefault()
 end
 
 function ReaderMenu:exitOrRestart(callback, force)
-    if self.menu_container then self:onTapCloseMenu() end
-
     -- Only restart sets a callback, which suits us just fine for this check ;)
     if callback and not force and not Device:isStartupScriptUpToDate() then
         UIManager:show(ConfirmBox:new{
@@ -374,36 +372,13 @@ function ReaderMenu:exitOrRestart(callback, force)
         return
     end
 
+    self:onTapCloseMenu()
     UIManager:nextTick(function()
         self.ui:onClose()
-        if callback ~= nil then
-            -- show an empty widget so that the callback always happens
-            local Widget = require("ui/widget/widget")
-            local widget = Widget:new{
-                width = Screen:getWidth(),
-                height = Screen:getHeight(),
-            }
-            UIManager:show(widget)
-            local waiting = function(waiting)
-                -- if we don't do this you can get a situation where either the
-                -- program won't exit due to remaining widgets until they're
-                -- dismissed or if the callback forces all widgets to close,
-                -- that the save document ConfirmBox is also closed
-                if self.ui and self.ui.document and self.ui.document:isEdited() then
-                    logger.dbg("waiting for save settings")
-                    UIManager:scheduleIn(1, function() waiting(waiting) end)
-                else
-                    callback()
-                    UIManager:close(widget)
-                end
-            end
-            UIManager:scheduleIn(1, function() waiting(waiting) end)
+        if callback then
+            callback()
         end
     end)
-    local FileManager = require("apps/filemanager/filemanager")
-    if FileManager.instance then
-        FileManager.instance:onClose()
-    end
 end
 
 function ReaderMenu:onShowMenu(tab_index)
@@ -456,29 +431,24 @@ function ReaderMenu:onShowMenu(tab_index)
 end
 
 function ReaderMenu:onCloseReaderMenu()
-    if self.menu_container then
-        self.last_tab_index = self.menu_container[1].last_index
-        self:onSaveSettings()
-        UIManager:close(self.menu_container)
-    end
+    if not self.menu_container then return true end
+    self.last_tab_index = self.menu_container[1].last_index
+    self:onSaveSettings()
+    UIManager:close(self.menu_container)
+    self.menu_container = nil
     return true
 end
 
 function ReaderMenu:onSetDimensions(dimen)
-    self:onCloseReaderMenu()
-end
-
-function ReaderMenu:onCloseDocument()
-    if Device:supportsScreensaver() then
-        -- Remove the item we added (which cleans up references to document
-        -- and doc_settings embedded in functions)
-        local screensaver_sub_item_table = require("ui/elements/screensaver_menu")
-        for i = #screensaver_sub_item_table, 1, -1 do
-            if screensaver_sub_item_table[i].added_by_readermenu_flag then
-                table.remove(screensaver_sub_item_table, i)
-            end
-        end
+    -- This widget doesn't support in-place layout updates, so, close & reopen
+    if self.menu_container then
+        self:onCloseReaderMenu()
+        self:onShowMenu()
     end
+
+    -- update gesture zones according to new screen dimen
+    -- (On CRe, this will get called a second time by ReaderReady once the document is reloaded).
+    self:initGesListener()
 end
 
 function ReaderMenu:_getTabIndexFromLocation(ges)

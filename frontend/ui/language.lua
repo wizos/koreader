@@ -6,8 +6,10 @@ local Language = {
     language_names = {
         C = "English",
         en = "English",
+        en_GB = "English (United Kingdom)",
         ca = "Catalá",
         cs = "Čeština",
+        da = "Dansk",
         de = "Deutsch",
         eo = "Esperanto",
         es = "Español",
@@ -22,7 +24,7 @@ local Language = {
         lt_LT = "Lietuvių",
         lv = "Latviešu",
         nl_NL = "Nederlands",
-        nb_NO = "Norsk",
+        nb_NO = "Norsk bokmål",
         pl = "Polski",
         pl_PL = "Polski2",
         pt_PT = "Português",
@@ -117,6 +119,7 @@ function Language:getLangMenuTable()
             -- NOTE: language with no translation are commented out for now
             sub_item_table = {
                 self:genLanguageSubItem("C"),
+                self:genLanguageSubItem("en_GB"),
                 self:genLanguageSubItem("ca"),
                 self:genLanguageSubItem("cs"),
                 self:genLanguageSubItem("de"),
@@ -137,7 +140,7 @@ function Language:getLangMenuTable()
                 --self:genLanguageSubItem("pl_PL"),
                 self:genLanguageSubItem("pt_PT"),
                 self:genLanguageSubItem("pt_BR"),
-                --self:genLanguageSubItem("ro"),
+                self:genLanguageSubItem("ro"),
                 self:genLanguageSubItem("ro_MD"),
                 self:genLanguageSubItem("sk"),
                 self:genLanguageSubItem("sv"),

@@ -35,7 +35,7 @@ local GetText_mt = {
     __index = {}
 }
 
--- wrapUntranslated() will be overriden by bidi.lua when UI language is RTL,
+-- wrapUntranslated() will be overridden by bidi.lua when UI language is RTL,
 -- to wrap untranslated english strings as LTR-isolated segments.
 -- It should do nothing when the UI language is LTR.
 GetText.wrapUntranslated_nowrap = function(text) return text end
@@ -58,7 +58,7 @@ Returns a translation.
     local translation = _("A meaningful message.")
 --]]
 function GetText_mt.__call(gettext, msgid)
-    return gettext.translation[msgid] or gettext.wrapUntranslated(msgid)
+    return gettext.translation[msgid] and gettext.translation[msgid][0] or gettext.translation[msgid] or gettext.wrapUntranslated(msgid)
 end
 
 local function c_escape(what_full, what)
@@ -275,6 +275,8 @@ function GetText_mt.__index.changeLang(new_lang)
                     -- unescape \\ or msgid won't match
                     s = s:gsub("\\\\", "\\")
                     data[what] = (data[what] or "") .. s
+                elseif what and s == "" and fuzzy then -- luacheck: ignore 542
+                    -- Ignore the likes of msgid "" and msgstr ""
                 else
                     -- Don't save this fuzzy string and unset fuzzy for the next one.
                     fuzzy = false

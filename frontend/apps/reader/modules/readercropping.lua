@@ -21,8 +21,6 @@ function ReaderCropping:onPageCrop(mode)
     -- backup original zoom mode as cropping use "page" zoom mode
     self.orig_zoom_mode = self.view.zoom_mode
     if mode == "auto" then
-        --- @fixme: This is weird. "auto" crop happens to be the default, yet the default zoom mode/genus is "page", not "content".
-        ---         This effectively yields different results whether auto is enabled by default, or toggled at runtime...
         if self.document.configurable.text_wrap ~= 1 then
             self:setCropZoomMode(true)
         end
@@ -57,8 +55,6 @@ function ReaderCropping:onPageCrop(mode)
     -- prepare bottom buttons so we know the size available for the page above it
     local button_table = ButtonTable:new{
         width = Screen:getWidth(),
-        button_font_face = "cfont",
-        button_font_size = 20,
         buttons = {{
             {
                 text = _("Cancel"),
@@ -107,7 +103,7 @@ function ReaderCropping:onPageCrop(mode)
     self.crop_dialog = VerticalGroup:new{
         align = "left",
         self.bbox_widget,
-        (Device:isTouchDevice() and button_container) or nil, -- button bar only availble for touch devices
+        (Device:isTouchDevice() and button_container) or nil, -- button bar only available for touch devices
     }
     UIManager:show(self.crop_dialog)
     return true

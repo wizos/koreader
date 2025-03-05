@@ -3,8 +3,27 @@ local Event = require("ui/event")
 local FileManager = require("apps/filemanager/filemanager")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
-local C_ = _.pgettext
 local Screen = Device.screen
+
+local function genMenuItem(text, mode)
+    return {
+        text_func = function()
+            return G_reader_settings:readSetting("fm_rotation_mode") == mode and text .. "   ★" or text
+        end,
+        checked_func = function()
+            return Screen:getRotationMode() == mode
+        end,
+        radio = true,
+        callback = function(touchmenu_instance)
+            UIManager:broadcastEvent(Event:new("SetRotationMode", mode))
+            touchmenu_instance:closeMenu()
+        end,
+        hold_callback = function(touchmenu_instance)
+            G_reader_settings:saveSetting("fm_rotation_mode", mode)
+            touchmenu_instance:updateItems()
+        end,
+    }
+end
 
 return {
     text = _("Rotation"),
@@ -22,9 +41,7 @@ return {
                     UIManager:broadcastEvent(Event:new("ToggleGSensor"))
                 end,
             })
-        end
 
-        if Device:hasGSensor() then
             table.insert(rotation_table, {
                 text = _("Lock auto rotation to current orientation"),
                 help_text = _([[
@@ -39,8 +56,7 @@ If you need to do so, you'll have to use the UI toggles.]]),
                     return G_reader_settings:isTrue("input_lock_gsensor")
                 end,
                 callback = function()
-                    G_reader_settings:flipNilOrFalse("input_lock_gsensor")
-                    Device:lockGSensor(G_reader_settings:isTrue("input_lock_gsensor"))
+                    UIManager:broadcastEvent(Event:new("LockGSensor"))
                 end,
             })
         end
@@ -61,92 +77,47 @@ When unchecked, the default rotation of the file browser and the default/saved r
         })
 
         if FileManager.instance then
-            table.insert(rotation_table, {
-                text_func = function()
-                    local text = C_("Rotation", "⤹ 90°")
-                    if G_reader_settings:readSetting("fm_rotation_mode") == Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE then
-                        text = text .. "   ★"
-                    end
-                    return text
-                end,
-                checked_func = function()
-                    return Screen:getRotationMode() == Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE
-                end,
-                radio = true,
-                callback = function(touchmenu_instance)
-                    UIManager:broadcastEvent(Event:new("SetRotationMode", Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE))
-                    if touchmenu_instance then touchmenu_instance:closeMenu() end
-                end,
-                hold_callback = function(touchmenu_instance)
-                    G_reader_settings:saveSetting("fm_rotation_mode", Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE)
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-            })
-            table.insert(rotation_table, {
-                text_func = function()
-                    local text = C_("Rotation", "↑ 0°")
-                    if G_reader_settings:readSetting("fm_rotation_mode") == Screen.DEVICE_ROTATED_UPRIGHT then
-                        text = text .. "   ★"
-                    end
-                    return text
-                end,
-                checked_func = function()
-                    return Screen:getRotationMode() == Screen.DEVICE_ROTATED_UPRIGHT
-                end,
-                radio = true,
-                callback = function(touchmenu_instance)
-                    UIManager:broadcastEvent(Event:new("SetRotationMode", Screen.DEVICE_ROTATED_UPRIGHT))
-                    if touchmenu_instance then touchmenu_instance:closeMenu() end
-                end,
-                hold_callback = function(touchmenu_instance)
-                    G_reader_settings:saveSetting("fm_rotation_mode", Screen.DEVICE_ROTATED_UPRIGHT)
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-            })
-            table.insert(rotation_table, {
-                text_func = function()
-                    local text = C_("Rotation", "⤸ 90°")
-                    if G_reader_settings:readSetting("fm_rotation_mode") == Screen.DEVICE_ROTATED_CLOCKWISE then
-                        text = text .. "   ★"
-                    end
-                    return text
-                end,
-                checked_func = function()
-                    return Screen:getRotationMode() == Screen.DEVICE_ROTATED_CLOCKWISE
-                end,
-                radio = true,
-                callback = function(touchmenu_instance)
-                    UIManager:broadcastEvent(Event:new("SetRotationMode", Screen.DEVICE_ROTATED_CLOCKWISE))
-                    if touchmenu_instance then touchmenu_instance:closeMenu() end
-                end,
-                hold_callback = function(touchmenu_instance)
-                    G_reader_settings:saveSetting("fm_rotation_mode", Screen.DEVICE_ROTATED_CLOCKWISE)
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-            })
-            table.insert(rotation_table, {
-                text_func = function()
-                    local text = C_("Rotation", "↓ 180°")
-                    if G_reader_settings:readSetting("fm_rotation_mode") == Screen.DEVICE_ROTATED_UPSIDE_DOWN then
-                        text = text .. "   ★"
-                    end
-                    return text
-                end,
-                checked_func = function()
-                    return Screen:getRotationMode() == Screen.DEVICE_ROTATED_UPSIDE_DOWN
-                end,
-                radio = true,
-                callback = function(touchmenu_instance)
-                    UIManager:broadcastEvent(Event:new("SetRotationMode", Screen.DEVICE_ROTATED_UPSIDE_DOWN))
-                    if touchmenu_instance then touchmenu_instance:closeMenu() end
-                end,
-                hold_callback = function(touchmenu_instance)
-                    G_reader_settings:saveSetting("fm_rotation_mode", Screen.DEVICE_ROTATED_UPSIDE_DOWN)
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-            })
+            local optionsutil = require("ui/data/optionsutil")
+            for i, mode in ipairs(optionsutil.rotation_modes) do
+                table.insert(rotation_table, genMenuItem(optionsutil.rotation_labels[i], mode))
+            end
         end
 
+        rotation_table[#rotation_table].separator = true
+        table.insert(rotation_table, {
+            text = _("Image viewer rotation"),
+            sub_item_table = {
+                {
+                    text = _("Invert default rotation in portrait mode"),
+                    checked_func = function()
+                        return G_reader_settings:isTrue("imageviewer_rotation_portrait_invert")
+                    end,
+                    callback = function()
+                        G_reader_settings:flipNilOrFalse("imageviewer_rotation_portrait_invert")
+                    end,
+                },
+                {
+                    text = _("Invert default rotation in landscape mode"),
+                    checked_func = function()
+                        return G_reader_settings:isTrue("imageviewer_rotation_landscape_invert")
+                    end,
+                    callback = function()
+                        G_reader_settings:flipNilOrFalse("imageviewer_rotation_landscape_invert")
+                    end,
+                    separator = true,
+                },
+                {
+                    text = _("Auto-rotate for best fit"),
+                    help_text = _("Auto-rotate the image to best match screen and image aspect ratios on image viewer launch (ie. if in portrait mode, a landscape image will be rotated).");
+                    checked_func = function()
+                        return G_reader_settings:isTrue("imageviewer_rotate_auto_for_best_fit")
+                    end,
+                    callback = function()
+                        G_reader_settings:flipTrue("imageviewer_rotate_auto_for_best_fit")
+                    end,
+                }
+            }
+        })
         return rotation_table
     end,
 }

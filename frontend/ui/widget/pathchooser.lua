@@ -1,24 +1,19 @@
 local BD = require("ui/bidi")
 local ButtonDialog = require("ui/widget/buttondialog")
-local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
 local Device = require("device")
-local Event = require("ui/event")
 local FileChooser = require("ui/widget/filechooser")
 local UIManager = require("ui/uimanager")
-local ffiutil = require("ffi/util")
+local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local util = require("util")
 local _ = require("gettext")
-local T = ffiutil.template
+local N_ = _.ngettext
+local T = ffiUtil.template
 
 local PathChooser = FileChooser:extend{
     title = true, -- or a string
         -- if let to true, a generic title will be set in init()
     no_title = false,
-    show_path = true,
-    is_popout = false,
-    covers_fullscreen = true, -- set it to false if you set is_popout = true
-    is_borderless = true,
     select_directory = true, -- allow selecting directories
     select_file = true,      -- allow selecting files
     show_files = true, -- show files, even if select_file=false
@@ -29,16 +24,18 @@ local PathChooser = FileChooser:extend{
 function PathChooser:init()
     if self.title == true then -- default title depending on options
         if self.select_directory and not self.select_file then
-            self.title = _("Long-press to choose a folder")
+            self.title = _("Long-press folder's name to choose it")
         elseif not self.select_directory and self.select_file then
-            self.title = _("Long-press to choose a file")
+            self.title = _("Long-press file's name to choose it")
         else
-            self.title = _("Long-press to choose")
+            self.title = _("Long-press item's name to choose it")
         end
     end
-    self.show_hidden = G_reader_settings:isTrue("show_hidden")
     if not self.show_files then
         self.file_filter = function() return false end -- filter out regular files
+    end
+    if self.file_filter then
+        self.show_unsupported = false -- honour file_filter
     end
     if self.select_directory then
         -- Let FileChooser display "Long-press to choose current folder"
@@ -63,7 +60,7 @@ function PathChooser:onMenuSelect(item)
         -- Don't navigate to same directory
         return true
     end
-    path = ffiutil.realpath(path)
+    path = ffiUtil.realpath(path)
     if not path then
         -- If starting in a no-more existing directory, allow
         -- not getting stuck in it
@@ -97,7 +94,7 @@ function PathChooser:onMenuHold(item)
     if path:sub(-2, -1) == "/." then -- with show_current_dir_for_hold
         path = path:sub(1, -3)
     end
-    path = ffiutil.realpath(path)
+    path = ffiUtil.realpath(path)
     if not path then
         return true
     end
@@ -113,21 +110,20 @@ function PathChooser:onMenuHold(item)
     end
     local title
     if attr.mode == "file" then
+        title = _("Choose this file?") .. "\n\n" .. BD.filepath(path) .. "\n"
         if self.detailed_file_info then
             local filesize = util.getFormattedSize(attr.size)
             local lastmod = os.date("%Y-%m-%d %H:%M", attr.modification)
-            title = T(_("Choose this file?\n\n%1\n\nFile size: %2 bytes\nLast modified: %3"),
-                        BD.filepath(path), filesize, lastmod)
-        else
-            title = T(_("Choose this file?\n\n%1"), BD.filepath(path))
+            title = title .. "\n" .. T(N_("File size: 1 byte", "File size: %1 bytes", attr.size), filesize) ..
+                             "\n" .. T(_("Last modified: %1"), lastmod) .. "\n"
         end
     elseif attr.mode == "directory" then
-        title = T(_("Choose this folder?\n\n%1"), BD.dirpath(path))
+        title = _("Choose this folder?") .. "\n\n" .. BD.dirpath(path) .. "\n"
     else -- just in case we get something else
-        title = T(_("Choose this path?\n\n%1"), BD.path(path))
+        title = _("Choose this path?") .. "\n\n" .. BD.path(path) .. "\n"
     end
     local onConfirm = self.onConfirm
-    self.button_dialog = ButtonDialogTitle:new{
+    self.button_dialog = ButtonDialog:new{
         title = title,
         buttons = {
             {
@@ -163,8 +159,11 @@ function PathChooser:showPlusMenu()
                     text = _("Folder shortcuts"),
                     callback = function()
                         UIManager:close(button_dialog)
-                        UIManager:broadcastEvent(Event:new("ShowFolderShortcutsDialog",
-                            function(path) self:changeToPath(path) end))
+                        local FileManagerShortcuts = require("apps/filemanager/filemanagershortcuts")
+                        local select_callback = function(path)
+                            self:changeToPath(path)
+                        end
+                        FileManagerShortcuts:onShowFolderShortcutsDialog(select_callback)
                     end,
                 },
             },
